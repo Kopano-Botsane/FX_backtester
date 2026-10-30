@@ -70,7 +70,7 @@ cd ../backend && .venv/bin/python -m uvicorn app.main:app --port 8000
 ## Desktop shell (Electron)
 
 ```bash
-npm install                      # root: electron + electron-builder
+npm install                      # root: electron + electron-builder (~100 MB)
 npm run build:frontend
 npm run electron                 # starts the Python backend, then the window
 BT_DEV_URL=http://localhost:5173 npm run electron   # dev with Vite HMR
@@ -82,8 +82,15 @@ For packaging, `npm run build:backend` (PyInstaller one-file) produces
 `resources/backend/`; `frontend/dist` is copied to `resources/frontend/dist`
 and the Python process is pointed at it with `BT_FRONTEND_DIST`.
 
-> The Electron/bootstrap code is written but has not been exercised in this
-> environment (Electron was not installed). The web app is fully functional.
+The packaged binary takes `--host` / `--port` (or `BT_HOST` / `BT_PORT`) and
+keeps writable state outside the one-file bundle: Electron sets
+`BT_DATA_DIR` and `BT_CACHE_DIR` to the app's `userData` directory.
+`backend/run.py` is the frozen entry point (the app package uses relative
+imports, so `app/main.py` cannot be the PyInstaller script directly).
+
+> The PyInstaller backend has been built and smoke-tested (REST, static
+> frontend, WebSocket replay). `electron-builder` installers have not been
+> produced in this environment yet.
 
 ## Controls
 
@@ -200,6 +207,7 @@ replay pacing/frame caps/seek clamping, `.bi5` decoding, CSV round-trip.
 ```
 backend/
   app/{main,replay,store,synth,ingest,config}.py
+  run.py                 # PyInstaller / `python run.py` entry point
   tests/
   data/ticks/            # real exports (gitignored)
 frontend/

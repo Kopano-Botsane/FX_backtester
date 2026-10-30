@@ -50,11 +50,26 @@ function backendCommand() {
   return { exe: path.join(ROOT, 'backend', '.venv', 'bin', 'python'), args: ['-m', 'app.main'] };
 }
 
+function backendEnv() {
+  const env = {
+    ...process.env,
+    BT_FRONTEND_DIST: frontendDist(),
+    PYTHONUNBUFFERED: '1',
+  };
+  if (app.isPackaged) {
+    // A one-file bundle unpacks to a temp dir, so keep writable state in userData.
+    const userData = app.getPath('userData');
+    env.BT_DATA_DIR = path.join(userData, 'data');
+    env.BT_CACHE_DIR = path.join(userData, 'cache');
+  }
+  return env;
+}
+
 function startBackend() {
   const { exe, args } = backendCommand();
   backend = spawn(exe, args, {
-    cwd: path.join(ROOT, 'backend'),
-    env: { ...process.env, BT_FRONTEND_DIST: frontendDist(), PYTHONUNBUFFERED: '1' },
+    cwd: app.isPackaged ? app.getPath('userData') : path.join(ROOT, 'backend'),
+    env: backendEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   backend.stdout.on('data', (d) => process.stdout.write(`[backend] ${d}`));

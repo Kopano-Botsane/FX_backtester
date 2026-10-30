@@ -20,13 +20,15 @@ cd backend
   --clean \
   --onefile \
   --name backtester-backend \
+  --paths . \
+  --collect-submodules app \
   --collect-submodules uvicorn \
   --hidden-import uvicorn.logging \
   --hidden-import uvicorn.loops.auto \
   --hidden-import uvicorn.protocols.http.auto \
   --hidden-import uvicorn.protocols.websockets.auto \
   --hidden-import uvicorn.lifespan.on \
-  app/main.py
+  run.py
 
 echo
 echo "Built: backend/dist/backtester-backend"

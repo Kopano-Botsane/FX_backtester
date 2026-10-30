@@ -295,9 +295,21 @@ def http_error(_request, exc: HTTPException) -> JSONResponse:
 
 
 def main() -> None:
+    """CLI entry point, also used by the frozen PyInstaller binary.
+
+    The app object is passed directly (not an import string) so it works from a
+    one-file bundle, where `app.main` is not importable by module path.
+    """
+    import argparse
+
     import uvicorn
 
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False)
+    parser = argparse.ArgumentParser(prog="backtester-backend")
+    parser.add_argument("--host", default=os.environ.get("BT_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("BT_PORT", "8000")))
+    args, _unknown = parser.parse_known_args()
+
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":

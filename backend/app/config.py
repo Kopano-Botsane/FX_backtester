@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
+
+def _env_dir(name: str, default: Path) -> Path:
+    """Directory from an env var (Electron points these at userData when frozen)."""
+    raw = os.environ.get(name)
+    return Path(raw).expanduser() if raw else default
+
+
 # Repository root (backend/app/config.py -> ../../)
 ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache"
+DATA_DIR = _env_dir("BT_DATA_DIR", Path(__file__).resolve().parents[1] / "data")
+CACHE_DIR = _env_dir("BT_CACHE_DIR", Path(__file__).resolve().parents[1] / ".cache")
 
 # A symbol's intrabar volatility scale, used by the synthetic generator and by
 # the price formatting on the client.
