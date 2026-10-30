@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+backend/.cache/
+backend/dist/
+backend/build/
+*.spec
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local market data (regenerated on demand; real exports stay local)
+backend/data/ticks/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.log

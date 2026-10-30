@@ -1,0 +1,42 @@
+{
+  "name": "backtester-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-pane, multi-timeframe forex/stock backtesting desktop app",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "postinstall": "npm --prefix frontend install",
+    "backend": "cd backend && .venv/bin/python -m app.main",
+    "frontend": "npm --prefix frontend run dev",
+    "build:frontend": "npm --prefix frontend run build",
+    "build:backend": "bash scripts/build_backend.sh",
+    "electron": "electron .",
+    "dist": "npm run build:frontend && npm run build:backend && electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^31.3.1",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.backtester.desktop",
+    "productName": "Backtester",
+    "files": [
+      "electron/**",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "frontend/dist", "to": "frontend/dist" },
+      { "from": "backend/dist/backtester-backend", "to": "backend/backtester-backend" }
+    ],
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Finance"
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "mac": {
+      "target": ["dmg"]
+    }
+  }
+}

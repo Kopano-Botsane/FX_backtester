@@ -1,0 +1,137 @@
+'use strict';
+
+const { app, BrowserWindow, dialog } = require('electron');
+const { spawn } = require('node:child_process');
+const path = require('node:path');
+const http = require('node:http');
+
+const HOST = '127.0.0.1';
+const PORT = 8000;
+const BASE = `http://${HOST}:${PORT}`;
+const ROOT = path.join(__dirname, '..');
+
+let backend = null;
+let quitting = false;
+
+function frontendDist() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'frontend', 'dist')
+    : path.join(ROOT, 'frontend', 'dist');
+}
+
+function probe() {
+  return new Promise((resolve) => {
+    const req = http.get(`${BASE}/api/health`, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.on('error', () => resolve(false));
+    req.setTimeout(400, () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function waitForBackend(timeoutMs = 40_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await probe()) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+function backendCommand() {
+  if (process.env.BT_BACKEND) return { exe: process.env.BT_BACKEND, args: [] };
+  if (app.isPackaged) {
+    return { exe: path.join(process.resourcesPath, 'backend', 'backtester-backend'), args: [] };
+  }
+  return { exe: path.join(ROOT, 'backend', '.venv', 'bin', 'python'), args: ['-m', 'app.main'] };
+}
+
+function startBackend() {
+  const { exe, args } = backendCommand();
+  backend = spawn(exe, args, {
+    cwd: path.join(ROOT, 'backend'),
+    env: { ...process.env, BT_FRONTEND_DIST: frontendDist(), PYTHONUNBUFFERED: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  backend.stdout.on('data', (d) => process.stdout.write(`[backend] ${d}`));
+  backend.stderr.on('data', (d) => process.stderr.write(`[backend] ${d}`));
+  backend.on('exit', (code, signal) => {
+    backend = null;
+    if (!quitting) console.error(`backend exited (code=${code} signal=${signal})`);
+  });
+}
+
+async function ensureBackend() {
+  if (await probe()) return true;
+  try {
+    startBackend();
+  } catch (err) {
+    console.error('failed to spawn backend', err);
+    return false;
+  }
+  return waitForBackend();
+}
+
+function stopBackend() {
+  quitting = true;
+  if (!backend) return;
+  backend.kill('SIGTERM');
+  const proc = backend;
+  setTimeout(() => {
+    if (proc.exitCode === null) proc.kill('SIGKILL');
+  }, 3000).unref();
+}
+
+async function createWindow() {
+  const ok = await ensureBackend();
+  if (!ok) {
+    dialog.showErrorBox(
+      'Backend unavailable',
+      'Could not start the replay backend.\n\n' +
+        'Development: create backend/.venv and install backend/requirements.txt.\n' +
+        'Packaged: build the PyInstaller binary (see README).',
+    );
+    app.quit();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: 1600,
+    height: 960,
+    minWidth: 1000,
+    minHeight: 600,
+    backgroundColor: '#0a0d12',
+    autoHideMenuBar: true,
+    title: 'Backtester',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  const devUrl = process.env.BT_DEV_URL;
+  if (devUrl) {
+    await win.loadURL(devUrl);
+    win.webContents.openDevTools({ mode: 'detach' });
+  } else {
+    await win.loadURL(BASE);
+  }
+}
+
+app.whenReady().then(createWindow);
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', stopBackend);
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+});
