@@ -23,6 +23,7 @@ import argparse
 import csv
 import gzip
 import lzma
+import os
 import struct
 import sys
 import time
@@ -51,7 +52,13 @@ RECORD_DTYPE = np.dtype([
 # Instruments exposed by Dukascopy's tick feed under the same ticker.
 DUKASCOPY_SYMBOLS = {"EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "XAUUSD"}
 
-USER_AGENT = "backtester-desktop/0.1 (+local research tool)"
+# Dukascopy's edge rejects non-browser clients with HTTP 503, so we default to
+# a standard browser User-Agent. Override with BT_DUKA_UA if it changes again.
+USER_AGENT = os.environ.get(
+    "BT_DUKA_UA",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36",
+)
 
 
 class IngestError(RuntimeError):
@@ -81,13 +88,21 @@ def hour_url(symbol: str, hour: datetime) -> str:
     )
 
 
-def fetch_hour(symbol: str, hour: datetime, point: float, retries: int = 3) -> Ticks:
+def fetch_hour(symbol: str, hour: datetime, point: float, retries: int = 6,
+               timeout: float = 60.0) -> Ticks:
+    """Fetch one hour of ticks.
+
+    Dukascopy's edge is aggressively rate-limited (answers arrived every
+    20-35 s in testing, with intermittent 503s), so keep concurrency low and
+    back off exponentially: 2, 5, 10, 20, 30, 45 s.
+    """
     url = hour_url(symbol, hour)
+    backoff = [2, 5, 10, 20, 30, 45]
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=30) as res:
+            with urllib.request.urlopen(req, timeout=timeout) as res:
                 raw = res.read()
             return decode_bi5(raw, int(hour.timestamp() * 1000), point)
         except urllib.error.HTTPError as exc:
@@ -96,7 +111,8 @@ def fetch_hour(symbol: str, hour: datetime, point: float, retries: int = 3) -> T
             last_error = exc
         except (urllib.error.URLError, TimeoutError, lzma.LZMAError) as exc:
             last_error = exc
-        time.sleep(0.6 * (attempt + 1))
+        if attempt < retries - 1:
+            time.sleep(backoff[min(attempt, len(backoff) - 1)])
     raise IngestError(f"{url}: {last_error}")
 
 
@@ -104,7 +120,7 @@ def download_day(
     symbol: str,
     day: date,
     hours: range | None = None,
-    workers: int = 8,
+    workers: int = 1,
 ) -> Ticks:
     symbol = symbol.upper()
     if symbol not in DUKASCOPY_SYMBOLS:
@@ -162,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("symbol")
     parser.add_argument("day", help="YYYY-MM-DD (UTC)")
     parser.add_argument("--hours", help="hour range, e.g. 8-16 (UTC)", default=None)
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args(argv)
 
     symbol = args.symbol.upper()

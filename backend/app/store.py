@@ -138,14 +138,28 @@ class CompositeStore:
         return self.synthetic.load(symbol, day)
 
     def available_days(self, symbol: str) -> list[date]:
+        days: set[date] = set()
+        # Real ingested exports first, then the synthetic dataset in-filled
+        # with recent sessions.
+        data_dir = self.csv.data_dir / "ticks" / symbol
+        if data_dir.is_dir():
+            for path in data_dir.iterdir():
+                name = path.name
+                if name.endswith(".gz"):
+                    name = name[:-3]
+                if name.endswith(".csv"):
+                    name = name[:-4]
+                try:
+                    days.add(date.fromisoformat(name))
+                except ValueError:
+                    continue  # not a day file (tmp files, etc.)
         today = datetime.now(timezone.utc).date()
-        days: list[date] = []
         for offset in range(DATASET_DAYS):
             day = today - timedelta(days=offset)
             if not synth.is_trading_day(symbol, day):
                 continue
-            days.append(day)
-        return days
+            days.add(day)
+        return sorted(days, reverse=True)
 
     def session(self, symbol: str, day: date) -> dict[str, int]:
         instr = INSTRUMENTS[symbol]

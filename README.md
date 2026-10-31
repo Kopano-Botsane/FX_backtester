@@ -206,6 +206,11 @@ for stocks. It is cached under `backend/.cache/ticks/<SYMBOL>/<DAY>.v2.npz`.
    .venv/bin/python -m app.ingest EURUSD 2026-03-17 --hours 8-16
    ```
 
+   Requests run serially with exponential backoff: Dukascopy's edge
+   rate-limits aggressively and 503s or resets parallel connections.
+   The day picker automatically lists ingested days alongside the
+   synthetic dataset.
+
    Files land in `backend/data/ticks/EURUSD/2026-03-17.csv.gz` and the
    `CompositeStore` prefers them over synthetic data automatically.
 
