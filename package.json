@@ -37,6 +37,11 @@
       "target": ["AppImage", "deb"],
       "category": "Finance"
     },
+    "deb": {
+      "afterInstall": "scripts/deb-after-install.sh",
+      "packageCategory": "utils",
+      "maintainer": "Kopano Botsane <184821080+Kopano-Botsane@users.noreply.github.com>"
+    },
     "win": {
       "target": ["nsis"]
     },

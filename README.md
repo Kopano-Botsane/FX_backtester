@@ -101,6 +101,20 @@ port 8000.
 > (bundled backend, live ticks, clean shutdown). Windows/macOS targets are
 > configured but unbuilt, and both platforms still use the stock Electron icon.
 
+#### AppImage sandbox error
+
+If you run the AppImage directly and Chromium aborts with
+"the SUID sandbox helper binary was found, but is not configured correctly",
+that is the FUSE mount stripping the set-UID bit from `chrome-sandbox`, not a
+bug in the app. Use one of:
+
+```bash
+./dist/Backtester-0.1.0.AppImage --appimage-extract-and-run   # keeps the sandbox
+./dist/Backtester-0.1.0.AppImage --no-sandbox                 # quick, less isolated
+sudo dpkg -i dist/backtester-desktop_0.1.0_amd64.deb          # best: full sandbox,
+                                                              # postinst chmods 4755
+```
+
 ## Controls
 
 | Action | Input |
