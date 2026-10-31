@@ -12,6 +12,9 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 
+# electron-builder output (installers)
+/dist/
+
 # Local market data (regenerated on demand; real exports stay local)
 backend/data/ticks/
 

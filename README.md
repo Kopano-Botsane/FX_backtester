@@ -88,9 +88,18 @@ keeps writable state outside the one-file bundle: Electron sets
 `backend/run.py` is the frozen entry point (the app package uses relative
 imports, so `app/main.py` cannot be the PyInstaller script directly).
 
-> The PyInstaller backend has been built and smoke-tested (REST, static
-> frontend, WebSocket replay). `electron-builder` installers have not been
-> produced in this environment yet.
+```bash
+npm run dist                     # frontend + PyInstaller + electron-builder
+ls dist/                         # Backtester-0.1.0.AppImage, *.deb
+```
+
+Electron leaves a pipe open on the backend's stdin (`BT_WATCH_STDIN=1`), so
+the server exits when the app quits or crashes instead of orphaning itself on
+port 8000.
+
+> Linux installers have been built and the AppImage launched end to end
+> (bundled backend, live ticks, clean shutdown). Windows/macOS targets are
+> configured but unbuilt, and both platforms still use the stock Electron icon.
 
 ## Controls
 
@@ -236,5 +245,5 @@ scripts/build_backend.sh
 6. **Performance** – binary tick frames (Float64Array over WS) instead of JSON
    for 1000× replay of dense tapes; typed-array bar storage with columnar
    buffers instead of per-bar objects.
-7. **Packaging** – verify PyInstaller + electron-builder on Linux/Windows,
-   code signing, auto-update.
+7. **Packaging** – verify PyInstaller + electron-builder on Windows
+   (`linux` targets verified), an app icon, code signing, auto-update.

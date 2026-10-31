@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
+import threading
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -294,6 +296,25 @@ def http_error(_request, exc: HTTPException) -> JSONResponse:
     return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
 
+def _exit_with_parent() -> None:
+    """Quit when the Electron parent quits.
+
+    Electron spawns us with a pipe on stdin that it never writes to, so EOF
+    means the shell is gone. Without this, closing the app (or a crash) leaves
+    an orphaned server holding the port until the machine reboots.
+    """
+
+    def read_until_eof() -> None:
+        try:
+            while sys.stdin.buffer.read(4096):
+                pass
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=read_until_eof, name="parent-watch", daemon=True).start()
+
+
 def main() -> None:
     """CLI entry point, also used by the frozen PyInstaller binary.
 
@@ -308,6 +329,9 @@ def main() -> None:
     parser.add_argument("--host", default=os.environ.get("BT_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("BT_PORT", "8000")))
     args, _unknown = parser.parse_known_args()
+
+    if os.environ.get("BT_WATCH_STDIN") == "1":
+        _exit_with_parent()
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

@@ -62,6 +62,7 @@ function backendEnv() {
     env.BT_DATA_DIR = path.join(userData, 'data');
     env.BT_CACHE_DIR = path.join(userData, 'cache');
   }
+  env.BT_WATCH_STDIN = '1';
   return env;
 }
 
@@ -70,7 +71,9 @@ function startBackend() {
   backend = spawn(exe, args, {
     cwd: app.isPackaged ? app.getPath('userData') : path.join(ROOT, 'backend'),
     env: backendEnv(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // stdin stays open and unwritten: the backend exits on EOF, so quitting
+    // the app (or crashing) never leaves an orphaned server on the port.
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   backend.stdout.on('data', (d) => process.stdout.write(`[backend] ${d}`));
   backend.stderr.on('data', (d) => process.stderr.write(`[backend] ${d}`));
