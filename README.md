@@ -196,9 +196,25 @@ bridge pinned to the next session open (so there are no midnight gaps), session
 shaped volatility, log-normal trade sizes, weekends closed, cash-session hours
 for stocks. It is cached under `backend/.cache/ticks/<SYMBOL>/<DAY>.v2.npz`.
 
-**Real data** – two paths:
+**Real data** – MT5 exports first, Dukascopy as an alternative:
 
-1. Dukascopy downloader (decodes the `.bi5` LZMA format directly):
+1. MetaTrader 5 tick exports: drop files into `MT5_CSV/<SYMBOL>_CSV/`
+   (any number, per symbol), then:
+
+   ```bash
+   cd backend
+   .venv/bin/python -m app.import_mt5                       # every *_CSV folder
+   .venv/bin/python -m app.import_mt5 XAUUSD                # one symbol
+   .venv/bin/python -m app.import_mt5 XAUUSD --side mid     # mid prices
+   .venv/bin/python -m app.import_mt5 EURUSD --start 2026-01-05 --end 2026-03-31
+   ```
+
+   Files stream day by day into `backend/data/ticks/<SYMBOL>/<date>.csv.gz`
+   and the day picker lists them automatically. Broker suffixes like
+   `XAUUSDm` / `EURUSD.pro` map to the base ticker. Times are taken exactly
+   as MT5 exports them (terminal time, treated as UTC).
+
+2. Dukascopy downloader (decodes the `.bi5` LZMA format directly):
 
    ```bash
    cd backend
@@ -208,17 +224,12 @@ for stocks. It is cached under `backend/.cache/ticks/<SYMBOL>/<DAY>.v2.npz`.
 
    Requests run serially with exponential backoff: Dukascopy's edge
    rate-limits aggressively and 503s or resets parallel connections.
-   The day picker automatically lists ingested days alongside the
-   synthetic dataset.
 
-   Files land in `backend/data/ticks/EURUSD/2026-03-17.csv.gz` and the
-   `CompositeStore` prefers them over synthetic data automatically.
+All of these land in `backend/data/ticks/<SYMBOL>/<date>.csv.gz` and the
+`CompositeStore` prefers real files over the synthetic tape automatically.
 
-2. Any CSV export with `timestamp,price,size` (epoch ms or ISO-8601), placed at
-   `backend/data/ticks/<SYMBOL>/<YYYY-MM-DD>.csv[.gz]`.
-
-Adjust `DUKASCOPY_SYMBOLS` in `backend/app/ingest.py` if you need other tickers,
-and `INSTRUMENTS` in `backend/app/config.py` for digits/session metadata.
+Adjust `INSTRUMENTS` in `backend/app/config.py` for digits/session metadata of
+new symbols.
 
 ## Tests
 

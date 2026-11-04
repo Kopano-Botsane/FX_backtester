@@ -104,9 +104,12 @@ class CsvTickStore:
         with opener(path, "rt", newline="") as fh:  # type: ignore[operator]
             reader = csv.DictReader(fh)
             for row in reader:
-                ts.append(_parse_ts(row["timestamp"]))
-                px.append(float(row["price"]))
-                sz.append(float(row.get("size") or 1.0))
+                try:
+                    ts.append(_parse_ts(row["timestamp"]))
+                    px.append(float(row["price"]))
+                    sz.append(float(row.get("size") or 1.0))
+                except (ValueError, TypeError, KeyError):
+                    continue  # skip blank/junk rows
         t = np.asarray(ts, dtype=np.int64)
         order = np.argsort(t, kind="stable")
         return Ticks(t[order], np.asarray(px, dtype=np.float64)[order],
