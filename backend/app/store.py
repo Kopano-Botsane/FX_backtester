@@ -142,7 +142,7 @@ class CompositeStore:
 
     def available_days(self, symbol: str) -> list[date]:
         days: set[date] = set()
-        # Real ingested exports first, then the synthetic dataset in-filled
+        # Real MT5 exports first, then the synthetic dataset in-filled
         # with recent sessions.
         data_dir = self.csv.data_dir / "ticks" / symbol
         if data_dir.is_dir():

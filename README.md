@@ -35,8 +35,8 @@ the 5m, 15m or 1h chart as the tape plays forward.
   symbol in `localStorage` and broadcast live to other windows.
 - **Cross-window sync** – `BroadcastChannel` keeps drawings, time window,
   crosshair and symbol in sync across tabs / pop-out monitors / Electron windows.
-- **Data layer** – deterministic synthetic tape (no network needed) plus a real
-  Dukascopy `.bi5` decoder/writer, and a CSV store adapter.
+- **Data layer** – deterministic synthetic tape (no network needed) plus an
+  MT5 tick-export importer that streams real tapes into the same store.
 
 Not built yet: order entry, P&L/position simulation, replay of historical
 news, order-flow/tick chart types, drawing persistence on a server, TimescaleDB.
@@ -149,7 +149,7 @@ Browser (Electron renderer)
 FastAPI
 ├─ /ws/replay             virtual clock, seek/pause/speed, prehistory
 ├─ /api/instruments|days|session
-└─ TickStore              synthetic (npz cache) | CSV export | Dukascopy ingest
+└─ TickStore              synthetic (npz cache) | real days (CSV, from MT5)
 ```
 
 ### Why it is built this way
@@ -196,10 +196,10 @@ bridge pinned to the next session open (so there are no midnight gaps), session
 shaped volatility, log-normal trade sizes, weekends closed, cash-session hours
 for stocks. It is cached under `backend/.cache/ticks/<SYMBOL>/<DAY>.v2.npz`.
 
-**Real data** – MT5 exports first, Dukascopy as an alternative:
+**Real data** – MetaTrader 5 tick exports:
 
-1. MetaTrader 5 tick exports: drop files into `MT5_CSV/<SYMBOL>_CSV/`
-   (any number, per symbol), then:
+1. Drop the exported files into `MT5_CSV/<SYMBOL>_CSV/` (any number, per
+   symbol), then:
 
    ```bash
    cd backend
@@ -214,16 +214,8 @@ for stocks. It is cached under `backend/.cache/ticks/<SYMBOL>/<DAY>.v2.npz`.
    `XAUUSDm` / `EURUSD.pro` map to the base ticker. Times are taken exactly
    as MT5 exports them (terminal time, treated as UTC).
 
-2. Dukascopy downloader (decodes the `.bi5` LZMA format directly):
-
-   ```bash
-   cd backend
-   .venv/bin/python -m app.ingest EURUSD 2026-03-17
-   .venv/bin/python -m app.ingest EURUSD 2026-03-17 --hours 8-16
-   ```
-
-   Requests run serially with exponential backoff: Dukascopy's edge
-   rate-limits aggressively and 503s or resets parallel connections.
+2. Any CSV export with `timestamp,price,size` (epoch ms or ISO-8601), placed at
+   `backend/data/ticks/<SYMBOL>/<YYYY-MM-DD>.csv[.gz]`.
 
 All of these land in `backend/data/ticks/<SYMBOL>/<date>.csv.gz` and the
 `CompositeStore` prefers real files over the synthetic tape automatically.
@@ -239,13 +231,13 @@ cd frontend && npm run typecheck && npm run build
 ```
 
 Covered: tick determinism, session bounds, weekend gaps, day-to-day continuity,
-replay pacing/frame caps/seek clamping, `.bi5` decoding, CSV round-trip.
+replay pacing/frame caps/seek clamping, MT5 import round-trips.
 
 ## Project layout
 
 ```
 backend/
-  app/{main,replay,store,synth,ingest,config}.py
+  app/{main,replay,store,synth,import_mt5,config}.py
   run.py                 # PyInstaller / `python run.py` entry point
   tests/
   data/ticks/            # real exports (gitignored)

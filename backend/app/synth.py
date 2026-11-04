@@ -1,8 +1,8 @@
 """Deterministic synthetic tick generation.
 
 Why synthetic data first: the replay engine, chart renderer and drawing model
-all need a stable, repeatable tape to develop against. Real Dukascopy downloads
-are optional and plug in through :class:`app.store.CsvTickStore`; this module
+all need a stable, repeatable tape to develop against. Real MT5 exports are
+optional and plug in through :class:`app.store.CsvTickStore`; this module
 exists so the app is usable with zero network access and so tests are
 reproducible.
 
