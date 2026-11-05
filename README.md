@@ -35,12 +35,16 @@ the 5m, 15m or 1h chart as the tape plays forward.
   symbol in `localStorage` and broadcast live to other windows.
 - **Cross-window sync** – `BroadcastChannel` keeps drawings, time window,
   crosshair and symbol in sync across tabs / pop-out monitors / Electron windows.
+- **Order simulation** – market/limit/stop orders against the replay cursor,
+  optional SL/TP bonding to the position, net position with flips, realized +
+  unrealized P&L, equity sparkline, session stats (win rate, profit factor,
+  max drawdown), trade log with CSV export and B/S hotkeys. Trades draw on the
+  chart as markers + entry→exit connectors in every pane/timeframe.
 - **Data layer** – deterministic synthetic tape (no network needed) plus an
   MT5 tick-export importer that streams real tapes into the same store.
 
-Not built yet: order entry, P&L/position simulation, replay of historical
-news, order-flow/tick chart types, drawing persistence on a server, TimescaleDB.
-See [Roadmap](#roadmap).
+Not built yet: historical news replay, order-flow/tick chart types, drawing
+persistence on a server, TimescaleDB. See [Roadmap](#roadmap).
 
 ## Quick start
 
@@ -199,6 +203,23 @@ live ticks stream in paced batches. Decoding is a plain `Float64Array` cast on
 the client — no parse step — and the three columns share one buffer that is
 transferred zero-copy into the candle-builder worker.
 
+**Trading messages** (JSON, both ways):
+
+```jsonc
+// client → server
+{"type":"order","kind":"market|limit|stop","side":"buy|sell","size":1,"price":...,"sl":...,"tp":...}
+{"type":"cancel","id":"..."}  {"type":"flatten"}  {"type":"sltp","sl":...,"tp":...}  {"type":"bookreset"}
+
+// server → client (pushed on every fill/position/stat change)
+{"type":"portfolio","cash":...,"position":...,"avgPrice":...,"sl":...,"tp":...,
+ "pending":[...],"fills":[...],"trades":[...],"stats":{...}}
+```
+
+Fills happen at the cursor's last price (market) or at the trigger price the
+moment the tape touches it (limit/stop/SL/TP). P&L is in quote currency, size
+in instrument units. The account resets on seek/restart (fills made at other
+cursor times would be meaningless).
+
 ## Data
 
 Out of the box the app generates a deterministic synthetic tape: a Brownian
@@ -236,12 +257,14 @@ new symbols.
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest      # 22 tests
+cd backend && .venv/bin/python -m pytest      # 35 tests
 cd frontend && npm run typecheck && npm run build
 ```
 
 Covered: tick determinism, session bounds, weekend gaps, day-to-day continuity,
-replay pacing/frame caps/seek clamping, MT5 import round-trips.
+replay pacing/frame caps/seek clamping, MT5 import round-trips, binary tick
+frame layout, order matching (market/limit/stop/SL/TP, flips, partial closes)
+and P&L/session stats.
 
 ## Project layout
 
@@ -255,27 +278,24 @@ frontend/
   src/chart/{pane,drawings}.ts
   src/data/{market,worker,replay}.ts
   src/{main,store,sync,types,util}.ts
-  src/ui/toolbar.ts
+  src/ui/{toolbar,trade}.ts
 electron/{main,preload}.cjs
 scripts/build_backend.sh
 ```
 
 ## Roadmap
 
-1. **Order simulation** – market/limit/stop orders, positions, equity curve,
-   session statistics, CSV trade export. The replay cursor is already the single
-   source of "now", which is what an execution model needs.
-2. **Storage at scale** – swap `TickStore` for TimescaleDB (hypertable on
+1. **Storage at scale** – swap `TickStore` for TimescaleDB (hypertable on
    `(symbol, ts)`, compression policy) or ClickHouse; the interface is one
    method. Add multi-day date-range loading.
-3. **Chart types** – tick/range/renko bars, volume profile, session breaks,
+2. **Chart types** – tick/range/renko bars, volume profile, session breaks,
    split-adjusted stock data.
-4. **Drawings v2** – per-day scoping option, text/arrow/measure tools,
+3. **Drawings v2** – per-day scoping option, text/arrow/measure tools,
    magnet mode, copy/paste, JSON import/export.
-5. **Multi-window** – real Electron pop-out windows (currently tabs/windows of
+4. **Multi-window** – real Electron pop-out windows (currently tabs/windows of
    the same origin), window layout persistence.
-6. **Performance** – typed-array bar storage with columnar buffers instead of
+5. **Performance** – typed-array bar storage with columnar buffers instead of
    per-bar objects in the renderer. *(Binary tick frames are done: Float64Array
    over WS, zero-copy transfer into the worker.)*
-7. **Packaging** – verify PyInstaller + electron-builder on Windows
+6. **Packaging** – verify PyInstaller + electron-builder on Windows
    (`linux` targets verified), an app icon, code signing, auto-update.

@@ -66,6 +66,12 @@ export interface ReplayState {
   message?: string;
 }
 
+/** Session trading state: the account book mirrored from the server. */
+export interface TradingState {
+  open: boolean;
+  equity: EquityPoint[];
+}
+
 export interface AppState {
   symbol: string;
   digits: number;
@@ -80,6 +86,105 @@ export interface AppState {
   syncDrawings: boolean;
   replay: ReplayState;
   sessionKey: number;
+  portfolio: Portfolio;
+  trade: TradingState;
+}
+
+// ------------------------------------------------------------- simulated trading
+
+export type OrderKind = 'market' | 'limit' | 'stop';
+export type TradeSide = 'buy' | 'sell';
+
+export interface TFill {
+  id: string;
+  t: number;
+  price: number;
+  size: number;
+  side: TradeSide;
+  kind: OrderKind | 'sl' | 'tp';
+  role: 'entry' | 'close' | 'flip';
+}
+
+export interface TTrade {
+  id: string;
+  side: TradeSide;
+  size: number;
+  entryId: string;
+  entryT: number;
+  entryPrice: number;
+  exitId: string;
+  exitT: number;
+  exitPrice: number;
+  pnl: number;
+  reason: 'order' | 'sl' | 'tp' | 'flatten';
+}
+
+export interface PendingOrder {
+  id: string;
+  kind: 'limit' | 'stop';
+  side: TradeSide;
+  size: number;
+  price: number;
+  t: number;
+}
+
+export interface SessionStats {
+  count: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  grossProfit: number;
+  grossLoss: number;
+  profitFactor: number | null;
+  avgWin: number;
+  avgLoss: number;
+  expectancy: number;
+  maxDrawdown: number;
+  maxDrawdownPct: number;
+}
+
+export interface Portfolio {
+  cash: number;
+  position: number;
+  avgPrice: number;
+  lastPrice: number;
+  sl: number | null;
+  tp: number | null;
+  pending: PendingOrder[];
+  fills: TFill[];
+  trades: TTrade[];
+  stats: SessionStats;
+}
+
+export const EMPTY_PORTFOLIO: Portfolio = {
+  cash: 0,
+  position: 0,
+  avgPrice: 0,
+  lastPrice: 0,
+  sl: null,
+  tp: null,
+  pending: [],
+  fills: [],
+  trades: [],
+  stats: {
+    count: 0,
+    wins: 0,
+    losses: 0,
+    winRate: 0,
+    grossProfit: 0,
+    grossLoss: 0,
+    profitFactor: null,
+    avgWin: 0,
+    avgLoss: 0,
+    expectancy: 0,
+    maxDrawdown: 0,
+    maxDrawdownPct: 0,
+  },
+};
+
+export interface EquityPoint {
+  t: number;
+  e: number;
 }
 
 export interface InstrumentInfo {

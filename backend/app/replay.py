@@ -40,6 +40,13 @@ class ReplayEngine:
     def end(self) -> int:
         return int(self.ticks.t[-1]) if len(self.ticks) else self.start_ms
 
+    @property
+    def last_price(self) -> float:
+        """Price of the last tick under the cursor (market-order fill price)."""
+        if len(self.ticks) == 0:
+            return 0.0
+        return float(self.ticks.p[self.ptr - 1]) if self.ptr > 0 else float(self.ticks.p[0])
+
     def seek(self, when_ms: int) -> None:
         self.time = int(max(when_ms, self.start))
         self.ptr = int(np.searchsorted(self.ticks.t, self.time, side="left"))

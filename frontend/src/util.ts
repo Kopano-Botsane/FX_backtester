@@ -73,6 +73,24 @@ export function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+const moneyFmt = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+  useGrouping: true,
+});
+
+/** Signed money amount, e.g. "" + "1,234.56"; the sign is added as prefix. */
+export function fmtMoney(v: number): string {
+  if (!isFinite(v)) return '--';
+  const s = moneyFmt.format(Math.abs(v));
+  return v < 0 ? `-$${s}` : `$${s}`;
+}
+
+export function fmtSignedMoney(v: number): string {
+  const m = fmtMoney(v);
+  return v > 0 ? `+${m}` : m;
+}
+
 export function uid(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 }

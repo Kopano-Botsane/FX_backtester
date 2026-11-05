@@ -27,6 +27,7 @@ from .config import (
     TIMEFRAMES_MS,
 )
 from .replay import ReplayEngine
+from .orders import Book
 from .store import CompositeStore, Ticks, default_start_ms
 
 app = FastAPI(title="Backtester Replay API", version=__version__)
@@ -188,6 +189,24 @@ async def replay_socket(ws: WebSocket) -> None:
             "ended": engine.ended,
         })
 
+    book = Book()
+    last_portfolio: tuple | None = None
+
+    async def push_portfolio(force: bool = False) -> None:
+        # Fills/position changes are rare relative to tick frames, so the
+        # signature keeps the panel a reactive push instead of a poll.
+        nonlocal last_portfolio
+        sig = (
+            book.pos, book.avg, book.cash, book.sl, book.tp,
+            len(book.pending), len(book.fills), len(book.trades),
+        )
+        if not force and sig == last_portfolio:
+            return
+        last_portfolio = sig
+        message = {"type": "portfolio"}
+        message.update(book.snapshot())
+        await ws.send_json(message)
+
     try:
         while True:
             try:
@@ -221,6 +240,10 @@ async def replay_socket(ws: WebSocket) -> None:
                     engine = ReplayEngine(ticks, start, speed)
                     last = time.monotonic()
                     last_state = None
+                    # Simulated trading restarts with the session (and on seek):
+                    # fills made at other cursor times would be meaningless.
+                    book.reset(engine.time, engine.last_price)
+                    last_portfolio = None
 
                     await ws.send_json({
                         "type": "session",
@@ -242,6 +265,7 @@ async def replay_socket(ws: WebSocket) -> None:
                         await send_ticks(ws, chunk, KIND_HISTORY, engine.time)
                         await asyncio.sleep(0)
                     await push_state(force=True)
+                    await push_portfolio(force=True)
                     continue
 
                 if kind == "speed" and engine is not None:
@@ -258,6 +282,8 @@ async def replay_socket(ws: WebSocket) -> None:
                 if kind == "seek" and engine is not None and symbol is not None:
                     engine.seek(int(msg.get("time", engine.time)))
                     last = time.monotonic()
+                    book.reset(engine.time, engine.last_price)
+                    last_portfolio = None
                     await ws.send_json({"type": "reset"})
                     history = engine.history
                     for offset in range(0, len(history), HISTORY_CHUNK):
@@ -266,10 +292,65 @@ async def replay_socket(ws: WebSocket) -> None:
                         await asyncio.sleep(0)
                     last_state = None
                     await push_state(force=True)
+                    await push_portfolio(force=True)
                     continue
 
                 if kind == "ping":
                     await ws.send_json({"type": "pong"})
+                    continue
+
+                # Trading messages: orders against the current cursor.
+                if engine is not None:
+                    if kind == "order":
+                        try:
+                            otype = str(msg.get("kind", "market"))
+                            if otype not in ("market", "limit", "stop"):
+                                raise ValueError(f"unknown kind {otype!r}")
+                            side_raw = str(msg.get("side", "")).lower()
+                            if side_raw not in ("buy", "sell"):
+                                raise ValueError("side must be buy or sell")
+                            size = abs(float(msg.get("size", 0)))
+                            price = float(msg.get("price") or 0)
+                            sl = msg.get("sl")
+                            tp = msg.get("tp")
+                            error = book.place(
+                                1 if side_raw == "buy" else -1,
+                                size,
+                                otype,
+                                price,
+                                float(sl) if sl is not None else None,
+                                float(tp) if tp is not None else None,
+                            )
+                        except (TypeError, ValueError) as exc:
+                            error = f"invalid order: {exc}"
+                        await push_portfolio(force=True)
+                        continue
+
+                    if kind == "cancel" and engine is not None:
+                        book.cancel(str(msg.get("id", "")))
+                        await push_portfolio(force=True)
+                        continue
+
+                    if kind == "flatten" and engine is not None:
+                        book.flatten()
+                        await push_portfolio(force=True)
+                        continue
+
+                    if kind == "sltp" and engine is not None:
+                        sl = msg.get("sl")
+                        tp = msg.get("tp")
+                        book.set_sltp(
+                            float(sl) if sl is not None else None,
+                            float(tp) if tp is not None else None,
+                        )
+                        await push_portfolio(force=True)
+                        continue
+
+                    if kind == "bookreset" and engine is not None:
+                        book.reset(engine.time, engine.last_price)
+                        last_portfolio = None
+                        await push_portfolio(force=True)
+                        continue
 
             # Pace the virtual clock off the monotonic wall clock.
             now = time.monotonic()
@@ -279,6 +360,8 @@ async def replay_socket(ws: WebSocket) -> None:
                 batch = engine.advance(wall_ms)
                 if len(batch):
                     await send_ticks(ws, batch, KIND_TICKS, engine.time)
+                    book.on_ticks(batch)
+                    await push_portfolio()
                 await push_state()
             elif engine is not None and engine.ended and last_state is None:
                 paused = True

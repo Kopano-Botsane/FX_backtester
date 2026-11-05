@@ -4,11 +4,14 @@ import { MarketData } from './data/market';
 import { ReplayClient, type SessionInfo } from './data/replay';
 import { Store, loadDrawings, saveDrawings } from './store';
 import { SyncChannel } from './sync';
+import { TradePanel } from './ui/trade';
 import {
   TF_MS,
+  EMPTY_PORTFOLIO,
   type AppState,
   type Drawing,
   type DrawingKind,
+  type EquityPoint,
   type InstrumentInfo,
   type PaneState,
   type Point,
@@ -67,6 +70,7 @@ class App implements ChartHost {
   private panes = new Map<string, ChartPane>();
   private grid = document.getElementById('grid')!;
   private toolbar!: Toolbar;
+  private tradePanel!: TradePanel;
   private clockEl!: HTMLElement;
   private scrubber!: HTMLInputElement;
   private hintEl!: HTMLElement;
@@ -92,6 +96,8 @@ class App implements ChartHost {
       syncTime: true,
       syncDrawings: true,
       sessionKey: 0,
+      portfolio: { ...EMPTY_PORTFOLIO },
+      trade: { open: localStorage.getItem('bt.trade') !== '0', equity: [] },
       replay: {
         status: 'idle',
         speed: 10,
@@ -117,6 +123,7 @@ class App implements ChartHost {
 
     this.buildToolbar(meta);
     this.buildStatusBar();
+    this.buildTradePanel();
     this.addPane('5m');
     this.addPane('1m');
     this.wireReplay();
@@ -141,7 +148,48 @@ class App implements ChartHost {
       onUndo: () => this.undo(),
       onClearDrawings: () => this.clearDrawings(),
       onLatest: () => this.latest(),
+      onTrade: () => this.toggleTradePanel(),
     });
+  }
+
+  private buildTradePanel(): void {
+    const aside = document.getElementById('trade')!;
+    this.tradePanel = new TradePanel(aside, {
+      place: (side) => this.placeTicket(side),
+      cancel: (id) => this.replay.cancelOrder(id),
+      flatten: () => this.replay.flatten(),
+      clearSltp: () => this.replay.setSltp(null, null),
+      reset: () => this.replay.resetBook(),
+      togglePanel: () => this.toggleTradePanel(),
+    });
+    this.applyTradePanelVisibility();
+  }
+
+  private toggleTradePanel(): void {
+    this.store.state.trade.open = !this.store.state.trade.open;
+    localStorage.setItem('bt.trade', this.store.state.trade.open ? '1' : '0');
+    this.applyTradePanelVisibility();
+    this.store.emit();
+  }
+
+  private applyTradePanelVisibility(): void {
+    // Toggling the dock resizes the chart panes; ResizeObserver repaints them.
+    document.getElementById('app')!.classList.toggle('trade-hidden', !this.store.state.trade.open);
+  }
+
+  private placeTicket(side: 'buy' | 'sell'): void {
+    if (!this.tradePanel) return;
+    const t = this.tradePanel.ticket();
+    if (!(t.size > 0)) {
+      this.tradePanel.setNote('Size must be a positive number');
+      return;
+    }
+    if (t.kind !== 'market' && !t.price) {
+      this.tradePanel.setNote('Limit/stop orders need a trigger price');
+      return;
+    }
+    this.tradePanel.setSide(side); // hotkeys B/S mark their side immediately
+    this.replay.placeOrder(t.kind, side, t.size, t.price, t.sl ?? null, t.tp ?? null);
   }
 
   private buildStatusBar(): void {
@@ -178,16 +226,24 @@ class App implements ChartHost {
     });
     this.replay.on('reset', () => {
       this.market.reset();
+      // The server wipes the simulated account with the session too.
+      this.store.state.portfolio = { ...EMPTY_PORTFOLIO };
+      this.store.state.trade.equity = [];
       this.store.state.replay.status = 'loading';
       this.store.emit();
     });
     this.replay.on('history', (t, p, s) => this.market.append(t, p, s));
     this.replay.on('ticks', (t, p, s) => {
       this.market.append(t, p, s);
+      this.pushEquity(t[t.length - 1], p[p.length - 1]);
       if (this.store.state.replay.status === 'loading') {
         this.store.state.replay.status = 'playing';
         this.store.emit();
       }
+    });
+    this.replay.on('portfolio', (p) => {
+      this.store.state.portfolio = p;
+      this.store.emit();
     });
     this.replay.on('state', (s) => {
       const r = this.store.state.replay;
@@ -208,6 +264,28 @@ class App implements ChartHost {
       this.store.state.replay.message = 'replay connection lost';
       this.store.emit();
     });
+  }
+
+  /**
+   * Equity accounting happens at the replay cursor: realized cash from the
+   * server + unrealized marked at this batch's last tick. One point per tick
+   * batch (a few/sec at low speed, ~20/s at 1000x) is plenty for the sparkline.
+   */
+  private pushEquity(t: number, price: number): void {
+    const p = this.store.state.portfolio;
+    if (p.position === 0 && p.cash === 0) {
+      if (this.store.state.trade.equity.length) this.store.state.trade.equity = [];
+      return;
+    }
+    const unreal = p.position ? p.position * (price - p.avgPrice) : 0;
+    const curve = this.store.state.trade.equity;
+    curve.push({ t, e: p.cash + unreal });
+    if (curve.length > 4000) {
+      // Decimate to keep the sparkline cheap without losing the shape.
+      const kept: EquityPoint[] = [];
+      for (let i = 0; i < curve.length; i += 2) kept.push(curve[i]);
+      this.store.state.trade.equity = kept;
+    }
   }
 
   private wireSync(): void {
@@ -279,6 +357,12 @@ class App implements ChartHost {
       }
       if (/^[1-4]$/.test(e.key) && !e.ctrlKey && !e.metaKey) {
         this.setLayout(Number(e.key));
+        return;
+      }
+      const k = e.key.toLowerCase();
+      if ((k === 'b' || k === 's') && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        this.placeTicket(k === 'b' ? 'buy' : 'sell');
       }
     });
   }
@@ -309,6 +393,8 @@ class App implements ChartHost {
     this.store.state.selectedId = null;
     this.store.state.crosshair = null;
     this.store.state.drawings = loadDrawings(symbol);
+    this.store.state.portfolio = { ...EMPTY_PORTFOLIO };
+    this.store.state.trade.equity = [];
     this.store.state.replay.status = 'loading';
     this.store.state.replay.message = undefined;
     this.store.emit();
@@ -610,6 +696,7 @@ class App implements ChartHost {
     if (this.hintEl.textContent !== hint) this.hintEl.textContent = hint;
 
     this.toolbar?.update(state);
+    this.tradePanel?.update(state, state.trade.equity, this.market.lastPrice ?? 0);
   }
 }
 

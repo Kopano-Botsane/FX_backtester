@@ -13,6 +13,7 @@ export interface ToolbarHandlers {
   onUndo(): void;
   onClearDrawings(): void;
   onLatest(): void;
+  onTrade(): void;
 }
 
 const TOOLS: { tool: Tool; icon: string; label: string }[] = [
@@ -44,6 +45,7 @@ export class Toolbar {
   private layoutButtons: HTMLButtonElement[] = [];
   private toolButtons = new Map<Tool, HTMLButtonElement>();
   private syncBtn: HTMLButtonElement;
+  private tradeBtn: HTMLButtonElement;
   private statusPill: HTMLSpanElement;
 
   constructor(root: HTMLElement, instruments: InstrumentInfo[], speeds: number[], handlers: ToolbarHandlers) {
@@ -121,6 +123,14 @@ export class Toolbar {
     toolGroup.append(color);
     this.el.append(toolGroup);
 
+    // Trading dock
+    const tradeGroup = node('div', 'group');
+    this.tradeBtn = node('button', 'icon', '$');
+    this.tradeBtn.title = 'Order simulation panel (B/S hotkeys)';
+    this.tradeBtn.addEventListener('click', () => handlers.onTrade());
+    tradeGroup.append(this.tradeBtn);
+    this.el.append(tradeGroup);
+
     // Actions
     const actionGroup = node('div', 'group');
     const undo = node('button', 'icon', '↺');
@@ -174,6 +184,7 @@ export class Toolbar {
     for (const [tool, btn] of this.toolButtons) {
       btn.classList.toggle('active', tool === state.tool);
     }
+    this.tradeBtn.classList.toggle('active', state.trade.open);
     this.layoutButtons.forEach((btn, idx) => btn.classList.toggle('active', idx + 1 === state.panes.length));
     this.syncBtn.classList.toggle('active', state.syncTime);
     this.setPill(state);

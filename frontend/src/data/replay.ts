@@ -1,3 +1,5 @@
+import type { Portfolio } from '../types';
+
 export interface SessionInfo {
   symbol: string;
   day: string;
@@ -22,6 +24,7 @@ type Handlers = {
   history: (t: Float64Array, p: Float64Array, s: Float64Array) => void;
   ticks: (t: Float64Array, p: Float64Array, s: Float64Array) => void;
   state: (s: ReplayStateMsg) => void;
+  portfolio: (p: Portfolio) => void;
   error: (message: string) => void;
   close: () => void;
 };
@@ -117,6 +120,9 @@ export class ReplayClient {
       case 'state':
         this.handlers.state?.(msg as unknown as ReplayStateMsg);
         break;
+      case 'portfolio':
+        this.handlers.portfolio?.(msg as unknown as Portfolio);
+        break;
       case 'error':
         this.handlers.error?.(String(msg.message ?? 'unknown error'));
         break;
@@ -143,6 +149,33 @@ export class ReplayClient {
 
   seek(time: number): void {
     this.send({ type: 'seek', time });
+  }
+
+  placeOrder(
+    kind: 'market' | 'limit' | 'stop',
+    side: 'buy' | 'sell',
+    size: number,
+    price?: number,
+    sl?: number | null,
+    tp?: number | null,
+  ): void {
+    this.send({ type: 'order', kind, side, size, price, sl: sl ?? undefined, tp: tp ?? undefined });
+  }
+
+  cancelOrder(id: string): void {
+    this.send({ type: 'cancel', id });
+  }
+
+  resetBook(): void {
+    this.send({ type: 'bookreset' });
+  }
+
+  flatten(): void {
+    this.send({ type: 'flatten' });
+  }
+
+  setSltp(sl: number | null, tp: number | null): void {
+    this.send({ type: 'sltp', sl: sl ?? undefined, tp: tp ?? undefined });
   }
 
   close(): void {

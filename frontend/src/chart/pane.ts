@@ -319,6 +319,7 @@ export class ChartPane {
       drawDrawing(ctx, d, proj, d.id === selectedId, d.id === this.hoverId);
     }
     if (this.preview) drawDrawing(ctx, this.preview, proj, true, false);
+    this.drawTrades(view);
     ctx.restore();
 
     this.drawAxes(view);
@@ -613,6 +614,97 @@ export class ChartPane {
     ctx.fillStyle = '#55637a';
     ctx.fillText(fmtTime(bar.t, tfMs), x, y);
     ctx.restore();
+  }
+
+  // ---------------------------------------------------------------- trades
+
+  /**
+   * Simulated-trade overlay: entry/close arrows, entry→exit connectors for
+   * closed trades, and dotted lines for the open position's average price,
+   * SL/TP and pending orders. Drawn in every pane so drawings-style cross-TF
+   * alignment holds (fills carry absolute {t, price} coordinates).
+   */
+  private drawTrades(view: View): void {
+    const p = this.host.store.state.portfolio;
+    const hasActivity =
+      p.fills.length > 0 || p.position !== 0 || p.pending.length > 0;
+    if (!hasActivity) return;
+    const ctx = this.ctx;
+    const { plot, proj } = view;
+    const left = proj.xToTime(plot.x);
+    const right = proj.xToTime(plot.x + plot.w);
+
+    // Connector lines for closed trades (skipped when both ends are outside).
+    if (p.trades.length) {
+      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1;
+      for (const tr of p.trades) {
+        const xA = proj.timeToX(tr.entryT);
+        const xB = proj.timeToX(tr.exitT);
+        if (xB < plot.x || xA > plot.x + plot.w) continue;
+        ctx.strokeStyle = tr.pnl >= 0 ? `${COLORS.up}aa` : `${COLORS.down}aa`;
+        ctx.beginPath();
+        ctx.moveTo(xA, proj.priceToY(tr.entryPrice));
+        ctx.lineTo(xB, proj.priceToY(tr.exitPrice));
+        ctx.stroke();
+      }
+    }
+
+    // Entry / close markers.
+    const r = 5;
+    for (const f of p.fills) {
+      if (f.t < left || f.t > right) continue;
+      const x = proj.timeToX(f.t);
+      const y = proj.priceToY(f.price);
+      const up = f.side === 'buy';
+      ctx.fillStyle = up ? COLORS.up : COLORS.down;
+      ctx.beginPath();
+      if (up) {
+        // ▲ under the fill for buys
+        ctx.moveTo(x, y + r + 3);
+        ctx.lineTo(x - r, y + r);
+        ctx.lineTo(x + r, y + r);
+      } else {
+        // ▼ above the fill for sells
+        ctx.moveTo(x, y - r - 3);
+        ctx.lineTo(x - r, y - r);
+        ctx.lineTo(x + r, y - r);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = COLORS.bg;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // Horizontal dotted lines: avg price, SL, TP, and pending orders.
+    const line = (price: number, color: string, label: string): void => {
+      if (!(price > 0) || !isFinite(price)) return;
+      const y = proj.priceToY(price);
+      if (y < plot.y + 8 || y > plot.y + plot.h - 8) return;
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(plot.x, Math.round(y) + 0.5);
+      ctx.lineTo(plot.x + plot.w, Math.round(y) + 0.5);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = '10px ui-sans-serif, system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = color;
+      ctx.fillText(label, plot.x + 6, y - 2);
+    };
+    if (p.position !== 0) {
+      line(p.avgPrice, COLORS.accent, 'entry');
+      if (p.sl !== null) line(p.sl, COLORS.down, 'SL');
+      if (p.tp !== null) line(p.tp, COLORS.up, 'TP');
+    }
+    for (const o of p.pending) {
+      line(o.price, o.side === 'buy' ? COLORS.up : COLORS.down, `${o.kind} ${o.size} ${o.side}`);
+    }
   }
 
   // ---------------------------------------------------------------- interaction
