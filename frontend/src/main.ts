@@ -5,6 +5,7 @@ import { ReplayClient, type SessionInfo } from './data/replay';
 import { Store, loadDrawings, saveDrawings } from './store';
 import { SyncChannel } from './sync';
 import { TradePanel } from './ui/trade';
+import { LandingPage } from './ui/landing';
 import {
   TF_MS,
   EMPTY_PORTFOLIO,
@@ -15,6 +16,7 @@ import {
   type InstrumentInfo,
   type PaneState,
   type Point,
+  type SessionConfig,
   type TF,
   type Tool,
 } from './types';
@@ -65,12 +67,12 @@ class App implements ChartHost {
 
   instruments: InstrumentInfo[] = [];
   speeds: number[] = [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000];
-  days: string[] = [];
 
   private panes = new Map<string, ChartPane>();
   private grid = document.getElementById('grid')!;
   private toolbar!: Toolbar;
   private tradePanel!: TradePanel;
+  private landingPage!: LandingPage;
   private clockEl!: HTMLElement;
   private scrubber!: HTMLInputElement;
   private hintEl!: HTMLElement;
@@ -79,12 +81,11 @@ class App implements ChartHost {
   private viewTimer = 0;
   private applyingRemote = false;
   private scrubbing = false;
-  private defaultStart = 0;
   private sessionToken = 0;
 
   constructor() {
     this.store = new Store({
-      symbol: 'EURUSD',
+      symbol: '',
       digits: 5,
       day: '',
       panes: [],
@@ -121,7 +122,8 @@ class App implements ChartHost {
     const savedSpeed = Number(localStorage.getItem('bt.speed') ?? '');
     if (this.speeds.includes(savedSpeed)) this.store.state.replay.speed = savedSpeed;
 
-    this.buildToolbar(meta);
+    this.buildLandingPage(meta);
+    this.buildToolbar();
     this.buildStatusBar();
     this.buildTradePanel();
     this.addPane('5m');
@@ -129,18 +131,22 @@ class App implements ChartHost {
     this.wireReplay();
     this.wireSync();
     this.wireKeyboard();
-
-    await this.loadDays('EURUSD');
-    await this.loadSession();
   }
 
-  private buildToolbar(meta: InstrumentMeta): void {
-    this.toolbar = new Toolbar(document.getElementById('toolbar')!, meta.instruments, meta.speeds, {
-      onSymbol: (symbol) => this.switchSymbol(symbol),
-      onDay: (day) => void this.loadSession({ day }),
+  private buildLandingPage(meta: InstrumentMeta): void {
+    const root = document.getElementById('landing')!;
+    this.landingPage = new LandingPage(root, {
+      start: (cfg) => this.startSession(cfg),
+    });
+    this.landingPage.setSymbols(meta.instruments);
+    this.landingPage.show();
+  }
+
+  private buildToolbar(): void {
+    this.toolbar = new Toolbar(document.getElementById('toolbar')!, {
       onSpeed: (speed) => this.setSpeed(speed),
       onPauseToggle: () => this.togglePause(),
-      onRestart: () => void this.loadSession({ startTime: this.defaultStart }),
+      onRestart: () => this.restartSession(),
       onLayout: (count) => this.setLayout(count),
       onTool: (tool: Tool) => this.store.update({ tool, selectedId: null }),
       onColor: (color) => this.store.update({ color }),
@@ -149,6 +155,7 @@ class App implements ChartHost {
       onClearDrawings: () => this.clearDrawings(),
       onLatest: () => this.latest(),
       onTrade: () => this.toggleTradePanel(),
+      onExit: () => this.exitToLanding(),
     });
   }
 
@@ -173,7 +180,6 @@ class App implements ChartHost {
   }
 
   private applyTradePanelVisibility(): void {
-    // Toggling the dock resizes the chart panes; ResizeObserver repaints them.
     document.getElementById('app')!.classList.toggle('trade-hidden', !this.store.state.trade.open);
   }
 
@@ -188,7 +194,7 @@ class App implements ChartHost {
       this.tradePanel.setNote('Limit/stop orders need a trigger price');
       return;
     }
-    this.tradePanel.setSide(side); // hotkeys B/S mark their side immediately
+    this.tradePanel.setSide(side);
     this.replay.placeOrder(t.kind, side, t.size, t.price, t.sl ?? null, t.tp ?? null);
   }
 
@@ -221,12 +227,10 @@ class App implements ChartHost {
       this.store.state.replay.time = s.time;
       this.store.state.replay.tickCount = s.tickCount;
       this.store.state.digits = s.digits;
-      if (!this.defaultStart) this.defaultStart = s.time;
       this.store.emit();
     });
     this.replay.on('reset', () => {
       this.market.reset();
-      // The server wipes the simulated account with the session too.
       this.store.state.portfolio = { ...EMPTY_PORTFOLIO };
       this.store.state.trade.equity = [];
       this.store.state.replay.status = 'loading';
@@ -266,28 +270,6 @@ class App implements ChartHost {
     });
   }
 
-  /**
-   * Equity accounting happens at the replay cursor: realized cash from the
-   * server + unrealized marked at this batch's last tick. One point per tick
-   * batch (a few/sec at low speed, ~20/s at 1000x) is plenty for the sparkline.
-   */
-  private pushEquity(t: number, price: number): void {
-    const p = this.store.state.portfolio;
-    if (p.position === 0 && p.cash === 0) {
-      if (this.store.state.trade.equity.length) this.store.state.trade.equity = [];
-      return;
-    }
-    const unreal = p.position ? p.position * (price - p.avgPrice) : 0;
-    const curve = this.store.state.trade.equity;
-    curve.push({ t, e: p.cash + unreal });
-    if (curve.length > 4000) {
-      // Decimate to keep the sparkline cheap without losing the shape.
-      const kept: EquityPoint[] = [];
-      for (let i = 0; i < curve.length; i += 2) kept.push(curve[i]);
-      this.store.state.trade.equity = kept;
-    }
-  }
-
   private wireSync(): void {
     this.sync.onDrawings = (symbol, drawings) => {
       if (symbol !== this.store.state.symbol) return;
@@ -308,10 +290,6 @@ class App implements ChartHost {
       this.applyingRemote = true;
       this.store.update({ crosshair: c });
       this.applyingRemote = false;
-    };
-    this.sync.onSymbol = (symbol) => {
-      if (symbol === this.store.state.symbol) return;
-      void this.switchSymbol(symbol, false);
     };
   }
 
@@ -369,96 +347,80 @@ class App implements ChartHost {
 
   // -------------------------------------------------------------------- session
 
-  private digitsFor(symbol: string): number {
-    return this.instruments.find((i) => i.symbol === symbol)?.digits ?? 5;
-  }
+  private async startSession(cfg: SessionConfig): Promise<void> {
+    // Call /api/session to resolve the day list and session bounds
+    const params = new URLSearchParams({
+      symbol: cfg.symbol,
+      start: cfg.start,
+      historyDays: String(cfg.historyDays),
+    });
+    if (cfg.end) params.set('end', cfg.end);
+    const info = await getJSON<SessionInfo>(`/api/session?${params.toString()}`);
 
-  private async loadDays(symbol: string): Promise<void> {
-    const res = await getJSON<{ days: string[] }>(`/api/days?symbol=${encodeURIComponent(symbol)}`);
-    if (this.store.state.symbol !== symbol) return; // superseded by a newer switch
-    this.days = res.days;
-    const day = this.days.includes(this.store.state.day) ? this.store.state.day : this.days[0] ?? '';
-    this.store.state.day = day;
-    this.toolbar.setDays(this.days, day);
-    this.store.emit();
-  }
+    // Hide landing, show main app
+    this.landingPage.hide();
 
-  private async loadSession(opts: { day?: string; startTime?: number } = {}): Promise<void> {
-    const symbol = this.store.state.symbol;
-    const day = opts.day ?? this.store.state.day;
-    if (!day) return;
-
-    this.store.state.day = day;
-    this.store.state.digits = this.digitsFor(symbol);
+    this.store.state.symbol = info.symbol;
+    this.store.state.digits = info.digits;
+    this.store.state.day = info.startDay; // for drawings key
     this.store.state.selectedId = null;
     this.store.state.crosshair = null;
-    this.store.state.drawings = loadDrawings(symbol);
-    this.store.state.portfolio = { ...EMPTY_PORTFOLIO };
+    this.store.state.drawings = loadDrawings(info.symbol);
+    this.store.state.portfolio = { ...EMPTY_PORTFOLIO, balance: cfg.balance };
     this.store.state.trade.equity = [];
     this.store.state.replay.status = 'loading';
     this.store.state.replay.message = undefined;
     this.store.emit();
 
-    const token = ++this.sessionToken;
-    try {
-      const info = await getJSON<SessionInfo & { defaultStart: number }>(
-        `/api/session?symbol=${encodeURIComponent(symbol)}&day=${encodeURIComponent(day)}`,
-      );
-      if (token !== this.sessionToken) return; // a newer session is loading
-      this.defaultStart = info.defaultStart;
-      const startTime = clamp(opts.startTime ?? info.defaultStart, info.start, info.end - 1000);
+    ++this.sessionToken;
 
-      this.store.state.replay.time = startTime;
-      this.store.state.replay.sessionStart = info.start;
-      this.store.state.replay.sessionEnd = info.end;
-      this.store.state.replay.tickCount = info.tickCount;
+    // Configure panes for the session
+    const panes = this.store.state.panes;
+    const finest = panes.length ? Math.min(...panes.map((p) => TF_MS[p.tf])) : 60_000;
+    const cols = panes.length <= 1 ? 1 : 2;
+    const paneWidth = Math.max(240, (window.innerWidth - 24) / cols);
+    const initialPxPerMs = clamp(paneWidth / (finest * 150), 1e-8, 0.2);
+    const margin = 0.02 * (paneWidth / initialPxPerMs);
 
-      // Panes share one time window unless the user turns time-sync off: that is
-      // what makes drawings line up across timeframes. Size it to ~150 bars of
-      // the finest pane so the coarser panes still show readable candles.
-      const panes = this.store.state.panes;
-      const finest = panes.length ? Math.min(...panes.map((p) => TF_MS[p.tf])) : 60_000;
-      const cols = panes.length <= 1 ? 1 : 2;
-      const paneWidth = Math.max(240, (window.innerWidth - 24) / cols);
-      const initialPxPerMs = clamp(paneWidth / (finest * 150), 1e-8, 0.2);
-      const margin = 0.02 * (paneWidth / initialPxPerMs);
+    for (const pane of panes) {
+      pane.pxPerMs = initialPxPerMs;
+      pane.plotWidth = paneWidth;
+      pane.rightTime = info.start + margin;
+      pane.follow = true;
+      pane.autoScale = true;
+      pane.viewReady = true;
+    }
+    this.store.state.sessionKey += 1;
+    this.market.reset();
+    this.store.emit();
 
-      for (const pane of panes) {
-        pane.pxPerMs = initialPxPerMs;
-        pane.plotWidth = paneWidth;
-        pane.rightTime = startTime + margin;
-        pane.viewReady = true;
-        pane.follow = true;
-        pane.autoScale = true;
-      }
-      this.store.state.sessionKey += 1;
-      this.market.reset();
-      this.store.emit();
+    // Subscribe with the full days list and balance
+    this.replay.subscribe(info.symbol, info.days, info.start, this.store.state.replay.speed, false, cfg.balance);
 
-      this.replay.subscribe(symbol, day, startTime, this.store.state.replay.speed);
-    } catch (err) {
-      if (token !== this.sessionToken) return;
-      this.store.state.replay.status = 'error';
-      this.store.state.replay.message = err instanceof Error ? err.message : 'failed to load session';
-      this.store.emit();
+    // Store session info for restart
+    (this as any).lastSessionConfig = cfg;
+    (this as any).lastSessionInfo = info;
+  }
+
+  private restartSession(): void {
+    const cfg = (this as any).lastSessionConfig as SessionConfig | undefined;
+    if (cfg) {
+      this.startSession(cfg);
     }
   }
 
-  private async switchSymbol(symbol: string, broadcast = true): Promise<void> {
-    if (symbol === this.store.state.symbol) return;
-    if (broadcast) this.sync.post({ type: 'symbol', symbol });
-    saveDrawings(this.store.state.symbol, this.store.state.drawings);
-    this.store.state.symbol = symbol;
-    this.store.state.digits = this.digitsFor(symbol);
+  private exitToLanding(): void {
+    this.replay.close();
+    this.market.reset();
+    this.store.state.portfolio = { ...EMPTY_PORTFOLIO };
+    this.store.state.trade.equity = [];
+    this.store.state.replay.status = 'idle';
+    this.store.state.replay.time = 0;
+    this.store.state.replay.sessionStart = 0;
+    this.store.state.replay.sessionEnd = 0;
+    this.store.state.replay.tickCount = 0;
     this.store.emit();
-    try {
-      await this.loadDays(symbol);
-      await this.loadSession({ day: this.days[0] });
-    } catch (err) {
-      this.store.state.replay.status = 'error';
-      this.store.state.replay.message = err instanceof Error ? err.message : 'symbol load failed';
-      this.store.emit();
-    }
+    this.landingPage.show();
   }
 
   private seek(time: number): void {
@@ -584,9 +546,6 @@ class App implements ChartHost {
   }
 
   private persistDrawings(): void {
-    // Snapshot at schedule time: by the time the debounce fires the active
-    // symbol may have changed, which would file these drawings under the wrong
-    // instrument.
     const { symbol, drawings, syncDrawings } = this.store.state;
     window.clearTimeout(this.persistTimer);
     this.persistTimer = window.setTimeout(() => {
@@ -679,6 +638,27 @@ class App implements ChartHost {
     }
   }
 
+  /**
+   * Equity accounting happens at the replay cursor: realized cash from the
+   * server + unrealized marked at this batch's last tick. One point per tick
+   * batch (a few/sec at low speed, ~20/s at 1000x) is plenty for the sparkline.
+   */
+  private pushEquity(t: number, price: number): void {
+    const p = this.store.state.portfolio;
+    if (p.position === 0 && p.cash === p.balance) {
+      if (this.store.state.trade.equity.length) this.store.state.trade.equity = [];
+      return;
+    }
+    const unreal = p.position ? p.position * (price - p.avgPrice) : 0;
+    const curve = this.store.state.trade.equity;
+    curve.push({ t, e: p.cash + unreal });
+    if (curve.length > 4000) {
+      const kept: EquityPoint[] = [];
+      for (let i = 0; i < curve.length; i += 2) kept.push(curve[i]);
+      this.store.state.trade.equity = kept;
+    }
+  }
+
   private updateStatus(): void {
     const state = this.store.state;
     const clock = state.replay.time ? fmtClock(state.replay.time) : '--:--:-- UTC';
@@ -690,7 +670,11 @@ class App implements ChartHost {
       const value = String(Math.round(clamp(pct, 0, 1) * 1000));
       if (this.scrubber.value !== value) this.scrubber.value = value;
     }
-    const hint = `${this.market.tickCount.toLocaleString()} ticks loaded · ${state.drawings.length} drawing${
+    const info = (this as any).lastSessionInfo as SessionInfo | undefined;
+    const rangeHint = info
+      ? ` ${info.days[0]} → ${info.days[info.days.length - 1]} (${info.days.length} days)`
+      : '';
+    const hint = `${this.market.tickCount.toLocaleString()} ticks loaded${rangeHint} · ${state.drawings.length} drawing${
       state.drawings.length === 1 ? '' : 's'
     } · ${state.panes.length} pane${state.panes.length === 1 ? '' : 's'} · scroll = zoom, drag axes = stretch`;
     if (this.hintEl.textContent !== hint) this.hintEl.textContent = hint;
@@ -710,7 +694,7 @@ app.boot().catch((err: unknown) => {
       <div class="empty" style="display:flex;flex-direction:column;gap:10px">
         <strong>Cannot reach the replay backend</strong>
         <span>${message}</span>
-        <span>Start it with <code>cd backend &amp;&amp; .venv/bin/python -m app.main</code>, then reload.</span>
+        <span>Start it with <code>cd backend && .venv/bin/python -m app.main</code>, then reload.</span>
       </div>
     </div>`;
   console.error(err);

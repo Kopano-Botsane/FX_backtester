@@ -128,6 +128,7 @@ class Book:
 
     def __init__(self) -> None:
         self.cash = 0.0  # realized P&L
+        self.balance = 0.0  # account balance set by the user (cash includes it)
         self.pos = 0.0  # signed net position
         self.avg = 0.0  # average entry price of the open position
         self.sl: float | None = None
@@ -152,9 +153,17 @@ class Book:
     def equity(self, price: float | None = None) -> float:
         return self.cash + self.unrealized(price)
 
-    def reset(self, now: int, last: float) -> None:
-        """Clear the account for a new/seeked session."""
-        self.cash = 0.0
+    def realized(self) -> float:
+        """Closed-trade P&L accumulated since session start."""
+        return self.cash - self.balance
+
+    def reset(self, now: int, last: float, balance: float | None = None) -> None:
+        """Clear the account for a new/seeked session.
+
+        ``balance=None`` keeps the current starting balance (bookreset)."""
+        if balance is not None:
+            self.balance = float(balance)
+        self.cash = self.balance
         self.pos = 0.0
         self.avg = 0.0
         self.sl = None
@@ -162,7 +171,7 @@ class Book:
         self.pending = []
         self.fills = []
         self.trades = []
-        self.peak_equity = 0.0
+        self.peak_equity = self.balance
         self.max_drawdown = 0.0
         self.open_entry_t = 0
         self.open_entry_price = 0.0
@@ -410,6 +419,7 @@ class Book:
 
     def snapshot(self) -> dict:
         return {
+            "balance": self.balance,
             "cash": self.cash,
             "position": self.pos,
             "avgPrice": self.avg,

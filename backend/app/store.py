@@ -164,18 +164,58 @@ class CompositeStore:
             days.add(day)
         return sorted(days, reverse=True)
 
-    def session(self, symbol: str, day: date) -> dict[str, int]:
-        instr = INSTRUMENTS[symbol]
-        start, end = synth.day_bounds_utc(day, instr)
-        return {
-            "start": start,
-            "end": end,
-            "defaultStart": default_start_ms(symbol, day),
-        }
+    def session_days(self, symbol: str) -> list[date]:
+        """Days a backtest session may span: real exports when the symbol has
+        any (synthetic data never mixes into a real tape), otherwise the
+        synthetic in-fill list."""
+        all_days = self.available_days(symbol)
+        real = [d for d in all_days if self.csv.path_for(symbol, d)]
+        return sorted(real or all_days, reverse=True)
+
+    def days_for_range(
+        self,
+        symbol: str,
+        start: date,
+        end: date | None = None,
+        history_days: int = 0,
+    ) -> list[date]:
+        """Resolve a session into a day list: ``history_days`` sessions before
+        ``start`` plus every day through ``end`` (default: the latest).
+
+        Integrity rule: if the symbol has *any* real export files, a session
+        uses only real days — the synthetic generator never contaminates a
+        real tape (export gaps simply produce a time jump). Symbols with no
+        real data keep the synthetic in-fill behaviour.
+
+        Raises KeyError when there is no data on the start date."""
+        asc = sorted(self.session_days(symbol))
+        if start not in asc:
+            raise KeyError(start.isoformat())
+        last = asc[-1]
+        stop = min(end, last) if end is not None and end <= last else (end if end is not None else last)
+        forward = [d for d in asc if start <= d <= stop]
+        back = [d for d in asc if d < start][-max(history_days, 0):]
+        return back + forward
+
+    def load_days(self, symbol: str, days: list[date]) -> Ticks:
+        """Concatenate the given days into one ascending tape."""
+        if not days:
+            raise ValueError("no days")
+        parts = [self.load(symbol, d) for d in days]
+        if len(parts) == 1:
+            return parts[0]
+        return Ticks(
+            np.concatenate([p.t for p in parts]),
+            np.concatenate([p.p for p in parts]),
+            np.concatenate([p.s for p in parts]),
+        )
 
 
 def default_start_ms(symbol: str, day: date) -> int:
-    """Start replay ~35% into the session so the chart opens with history."""
+    """Start replay ~35% into the session so the chart opens with history.
+
+    Used by tests and ad-hoc drills; the app now starts sessions at the
+    session open of the chosen start day."""
     instr = INSTRUMENTS[symbol]
     start, end = synth.day_bounds_utc(day, instr)
     offset = round((end - start) * 0.35 / 60_000) * 60_000

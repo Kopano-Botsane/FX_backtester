@@ -28,7 +28,8 @@ from .config import (
 )
 from .replay import ReplayEngine
 from .orders import Book
-from .store import CompositeStore, Ticks, default_start_ms
+from . import synth
+from .store import CompositeStore, Ticks
 
 app = FastAPI(title="Backtester Replay API", version=__version__)
 app.add_middleware(
@@ -40,9 +41,12 @@ app.add_middleware(
 
 store = CompositeStore()
 
-# Small in-process cache: a day of ticks is loaded once per symbol/day and shared
-# by every socket (ticks are immutable, so sharing is safe).
+# In-process caches. Days are immutable once loaded, so they are shared across
+# sockets and restarts of the same session; the range cache keeps assembled
+# multi-day tapes around so pressing Restart/re-subscribing is instant.
 _day_cache: dict[tuple[str, str], Ticks] = {}
+_range_cache: dict[tuple[str, tuple[str, ...]], Ticks] = {}
+MAX_RANGE_TICKS = 40_000_000  # ≈960 MB of three f64 columns
 
 
 def get_ticks(symbol: str, day: date) -> Ticks:
@@ -50,10 +54,43 @@ def get_ticks(symbol: str, day: date) -> Ticks:
     cached = _day_cache.get(key)
     if cached is None:
         cached = store.load(symbol, day)
-        if len(_day_cache) > 24:
-            _day_cache.pop(next(iter(_day_cache)))
+        if len(_day_cache) > 512:
+            for _ in range(64):
+                _day_cache.pop(next(iter(_day_cache)))
         _day_cache[key] = cached
     return cached
+
+
+def get_range_ticks(symbol: str, days: list[date]) -> Ticks:
+    key = (symbol, tuple(d.isoformat() for d in days))
+    cached = _range_cache.get(key)
+    if cached is not None:
+        return cached
+    total = 0
+    parts: list[Ticks] = []
+    for day in days:
+        part = get_ticks(symbol, day)
+        total += len(part)
+        if total > MAX_RANGE_TICKS:
+            raise ValueError(
+                f"range too large: over {MAX_RANGE_TICKS:,} ticks — pull the end date in"
+            )
+        if len(part):
+            parts.append(part)
+    if not parts:
+        raise ValueError("the selected days contain no tick data")
+    if len(_range_cache) > 3:
+        _range_cache.pop(next(iter(_range_cache)))
+    if len(parts) == 1:
+        tape = parts[0]
+    else:
+        tape = Ticks(
+            np.concatenate([p.t for p in parts]),
+            np.concatenate([p.p for p in parts]),
+            np.concatenate([p.s for p in parts]),
+        )
+    _range_cache[key] = tape
+    return tape
 
 
 def parse_symbol(symbol: str) -> str:
@@ -103,26 +140,46 @@ def days(symbol: str) -> dict[str, object]:
     symbol = parse_symbol(symbol)
     return {
         "symbol": symbol,
-        "days": [d.isoformat() for d in store.available_days(symbol)],
+        "days": [d.isoformat() for d in store.session_days(symbol)],
     }
 
 
 @app.get("/api/session")
-def session(symbol: str, day: str) -> dict[str, object]:
+def session(
+    symbol: str,
+    start: str,
+    end: str | None = None,
+    historyDays: int = 5,
+) -> dict[str, object]:
+    """Resolve a session: the start replay day plus optional trailing days and
+    sessions of preload history before it. Cheap — resolves day lists and
+    session bounds without loading any tick tape."""
     symbol = parse_symbol(symbol)
-    parsed = parse_day(day)
-    ticks = get_ticks(symbol, parsed)
-    bounds = store.session(symbol, parsed)
-    if len(ticks) == 0:
-        raise HTTPException(status_code=404, detail="no data for that day")
+    start_day = parse_day(start)
+    end_day = parse_day(end) if end else None
+    if historyDays < 0 or historyDays > 60:
+        raise HTTPException(status_code=400, detail="historyDays must be 0-60")
+    try:
+        days = store.days_for_range(symbol, start_day, end_day, historyDays)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"no data on {exc.args[0]}"
+        ) from None
+
+    last_day = days[-1]
+    instr = INSTRUMENTS[symbol]
+    cursor_start = synth.day_bounds_utc(start_day, instr)[0]
+    _, session_end = synth.day_bounds_utc(last_day, instr)
     return {
         "symbol": symbol,
-        "day": day,
-        "digits": INSTRUMENTS[symbol].digits,
-        "start": bounds["start"],
-        "end": bounds["end"],
-        "defaultStart": default_start_ms(symbol, parsed),
-        "tickCount": len(ticks),
+        "digits": instr.digits,
+        "startDay": start_day.isoformat(),
+        "endDay": last_day.isoformat(),
+        "days": [d.isoformat() for d in days],
+        "start": cursor_start,
+        "end": session_end,
+        "replayDays": sum(1 for d in days if d >= start_day),
+        "prehistoryDays": len(days) - sum(1 for d in days if d >= start_day),
     }
 
 
@@ -222,35 +279,49 @@ async def replay_socket(ws: WebSocket) -> None:
                 if kind == "subscribe":
                     try:
                         symbol = parse_symbol(str(msg.get("symbol", "")))
-                        day = parse_day(str(msg.get("day", "")))
-                    except HTTPException as exc:
-                        await ws.send_json({"type": "error", "message": str(exc.detail)})
+                        raw_days = msg.get("days")
+                        if (
+                            not isinstance(raw_days, list)
+                            or not raw_days
+                            or len(raw_days) > 400
+                        ):
+                            raise ValueError("a 'days' list (1-400 dates) is required")
+                        days_ = sorted({parse_day(str(d)) for d in raw_days})
+                    except (HTTPException, ValueError) as exc:
+                        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                        await ws.send_json({"type": "error", "message": str(detail)})
                         continue
 
-                    ticks = get_ticks(symbol, day)
-                    if len(ticks) == 0:
-                        await ws.send_json({"type": "error", "message": "no data for that day"})
-                        continue
-
-                    digits = INSTRUMENTS[symbol].digits
-                    start = int(msg.get("startTime") or default_start_ms(symbol, day))
                     speed = float(msg.get("speed") or 10.0)
                     speed = min(max(speed, 0.1), max(SPEEDS))
                     paused = bool(msg.get("paused", False))
-                    engine = ReplayEngine(ticks, start, speed)
+                    balance = float(msg.get("balance") or 0.0)
+                    start_time = int(msg.get("startTime") or 0)
+
+                    try:
+                        ticks = get_range_ticks(symbol, days_)
+                    except ValueError as exc:
+                        await ws.send_json({"type": "error", "message": str(exc)})
+                        continue
+
+                    digits = INSTRUMENTS[symbol].digits
+                    cursor = max(start_time, int(ticks.t[0])) if len(ticks) else start_time
+                    cursor = min(cursor, int(ticks.t[-1])) if len(ticks) else cursor
+                    engine = ReplayEngine(ticks, cursor, speed)
                     last = time.monotonic()
                     last_state = None
                     # Simulated trading restarts with the session (and on seek):
                     # fills made at other cursor times would be meaningless.
-                    book.reset(engine.time, engine.last_price)
+                    book.reset(engine.time, engine.last_price, balance)
                     last_portfolio = None
 
                     await ws.send_json({
                         "type": "session",
                         "symbol": symbol,
-                        "day": day.isoformat(),
+                        "days": [d.isoformat() for d in days_],
                         "digits": digits,
-                        "start": engine.start,
+                        "start": engine.time,
+                        "tapeStart": int(ticks.t[0]) if len(ticks) else engine.time,
                         "end": engine.end,
                         "time": engine.time,
                         "speed": engine.speed,

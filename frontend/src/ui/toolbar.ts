@@ -1,8 +1,6 @@
-import type { AppState, InstrumentInfo, Tool } from '../types';
+import type { AppState, Tool } from '../types';
 
 export interface ToolbarHandlers {
-  onSymbol(symbol: string): void;
-  onDay(day: string): void;
   onSpeed(speed: number): void;
   onPauseToggle(): void;
   onRestart(): void;
@@ -14,6 +12,7 @@ export interface ToolbarHandlers {
   onClearDrawings(): void;
   onLatest(): void;
   onTrade(): void;
+  onExit(): void;
 }
 
 const TOOLS: { tool: Tool; icon: string; label: string }[] = [
@@ -38,8 +37,6 @@ function node<K extends keyof HTMLElementTagNameMap>(
 
 export class Toolbar {
   readonly el: HTMLElement;
-  private symbolSelect: HTMLSelectElement;
-  private daySelect: HTMLSelectElement;
   private playBtn: HTMLButtonElement;
   private speedSelect: HTMLSelectElement;
   private layoutButtons: HTMLButtonElement[] = [];
@@ -47,28 +44,10 @@ export class Toolbar {
   private syncBtn: HTMLButtonElement;
   private tradeBtn: HTMLButtonElement;
   private statusPill: HTMLSpanElement;
+  private exitBtn: HTMLButtonElement;
 
-  constructor(root: HTMLElement, instruments: InstrumentInfo[], speeds: number[], handlers: ToolbarHandlers) {
+  constructor(root: HTMLElement, handlers: ToolbarHandlers) {
     this.el = root;
-
-    // Symbol
-    const symGroup = node('div', 'group');
-    this.symbolSelect = node('select');
-    this.symbolSelect.title = 'Instrument';
-    for (const inst of instruments) {
-      const opt = node('option');
-      opt.value = inst.symbol;
-      opt.textContent = inst.symbol;
-      this.symbolSelect.appendChild(opt);
-    }
-    this.symbolSelect.addEventListener('change', () => handlers.onSymbol(this.symbolSelect.value));
-    symGroup.append(this.symbolSelect);
-
-    this.daySelect = node('select');
-    this.daySelect.title = 'Trading day (UTC)';
-    this.daySelect.addEventListener('change', () => handlers.onDay(this.daySelect.value));
-    symGroup.append(this.daySelect);
-    this.el.append(symGroup);
 
     // Transport
     const replayGroup = node('div', 'group');
@@ -80,7 +59,7 @@ export class Toolbar {
     this.playBtn.addEventListener('click', () => handlers.onPauseToggle());
     this.speedSelect = node('select');
     this.speedSelect.title = 'Replay speed';
-    for (const speed of speeds) {
+    for (const speed of [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]) {
       const opt = node('option');
       opt.value = String(speed);
       opt.textContent = `${speed}×`;
@@ -145,19 +124,11 @@ export class Toolbar {
     this.syncBtn = node('button', undefined, 'Sync');
     this.syncBtn.title = 'Keep all panes on the same time window';
     this.syncBtn.addEventListener('click', () => handlers.onSyncTime());
-    actionGroup.append(undo, clear, latest, this.syncBtn);
+    this.exitBtn = node('button', undefined, '⌂');
+    this.exitBtn.title = 'Back to session setup';
+    this.exitBtn.addEventListener('click', () => handlers.onExit());
+    actionGroup.append(undo, clear, latest, this.syncBtn, this.exitBtn);
     this.el.append(actionGroup);
-  }
-
-  setDays(days: string[], selected: string): void {
-    this.daySelect.replaceChildren();
-    for (const day of days) {
-      const opt = node('option');
-      opt.value = day;
-      opt.textContent = day;
-      this.daySelect.appendChild(opt);
-    }
-    if (selected) this.daySelect.value = selected;
   }
 
   private setPill(state: AppState): void {
@@ -176,8 +147,6 @@ export class Toolbar {
   }
 
   update(state: AppState): void {
-    if (this.symbolSelect.value !== state.symbol) this.symbolSelect.value = state.symbol;
-    if (this.daySelect.value !== state.day) this.daySelect.value = state.day;
     if (this.speedSelect.value !== String(state.replay.speed)) {
       this.speedSelect.value = String(state.replay.speed);
     }

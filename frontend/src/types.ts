@@ -154,6 +154,7 @@ export interface Portfolio {
   fills: TFill[];
   trades: TTrade[];
   stats: SessionStats;
+  balance: number;
 }
 
 export const EMPTY_PORTFOLIO: Portfolio = {
@@ -180,11 +181,20 @@ export const EMPTY_PORTFOLIO: Portfolio = {
     maxDrawdown: 0,
     maxDrawdownPct: 0,
   },
+  balance: 0,
 };
 
 export interface EquityPoint {
   t: number;
   e: number;
+}
+
+export interface SessionConfig {
+  symbol: string;
+  balance: number;
+  start: string;
+  end: string | null;
+  historyDays: number;
 }
 
 export interface InstrumentInfo {

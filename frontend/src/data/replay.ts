@@ -2,9 +2,12 @@ import type { Portfolio } from '../types';
 
 export interface SessionInfo {
   symbol: string;
-  day: string;
+  days: string[];
   digits: number;
+  startDay: string;
+  endDay: string;
   start: number;
+  tapeStart: number;
   end: number;
   time: number;
   speed: number;
@@ -62,7 +65,14 @@ function decodeTickFrame(buf: ArrayBuffer): { kind: number; t: Float64Array; p: 
 export class ReplayClient {
   private ws: WebSocket | null = null;
   private handlers: Partial<Handlers> = {};
-  private pendingSubscribe: { symbol: string; day: string; startTime: number; speed: number } | null = null;
+  private pendingSubscribe: {
+    symbol: string;
+    days: string[];
+    startTime: number;
+    speed: number;
+    paused: boolean;
+    balance: number;
+  } | null = null;
 
   on<K extends keyof Handlers>(name: K, fn: Handlers[K]): void {
     this.handlers[name] = fn;
@@ -133,8 +143,8 @@ export class ReplayClient {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(payload));
   }
 
-  subscribe(symbol: string, day: string, startTime: number, speed: number): void {
-    this.pendingSubscribe = { symbol, day, startTime, speed };
+  subscribe(symbol: string, days: string[], startTime: number, speed: number, paused: boolean, balance: number): void {
+    this.pendingSubscribe = { symbol, days, startTime, speed, paused, balance };
     this.connect();
     if (this.connected) this.send({ type: 'subscribe', ...this.pendingSubscribe });
   }
