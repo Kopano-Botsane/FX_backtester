@@ -19,12 +19,38 @@ export interface ReplayStateMsg {
 type Handlers = {
   session: (s: SessionInfo) => void;
   reset: () => void;
-  history: (t: number[], p: number[], s: number[]) => void;
-  ticks: (t: number[], p: number[], s: number[]) => void;
+  history: (t: Float64Array, p: Float64Array, s: Float64Array) => void;
+  ticks: (t: Float64Array, p: Float64Array, s: Float64Array) => void;
   state: (s: ReplayStateMsg) => void;
   error: (message: string) => void;
   close: () => void;
 };
+
+/**
+ * Binary tick frame layout (see backend/app/main.py, TICK_HDR):
+ *   u8 kind (1 = history, 2 = ticks), 3x reserved, u32 count,
+ *   f64 cursor time, then count Float64 t, p, s columns.
+ * Little-endian; JS DataView/Float64Array reads little-endian by default on
+ * every supported platform, and TypedArray aliases are disallowed on exotic
+ * endianness anyway, so a plain cast is safe.
+ */
+const KIND_HISTORY = 1;
+const KIND_TICKS = 2;
+
+function decodeTickFrame(buf: ArrayBuffer): { kind: number; t: Float64Array; p: Float64Array; s: Float64Array } | null {
+  if (buf.byteLength < 16) return null;
+  const view = new DataView(buf);
+  const kind = view.getUint8(0);
+  const count = view.getUint32(4, true);
+  const floats = count * 24;
+  if (16 + floats > buf.byteLength) return null;
+  return {
+    kind,
+    t: new Float64Array(buf, 16, count),
+    p: new Float64Array(buf, 16 + count * 8, count),
+    s: new Float64Array(buf, 16 + count * 16, count),
+  };
+}
 
 /**
  * WebSocket replay client. The server paces the virtual clock; this class only
@@ -49,6 +75,7 @@ export class ReplayClient {
     }
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws/replay`);
+    ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
     ws.onopen = () => {
@@ -57,13 +84,20 @@ export class ReplayClient {
       }
     };
     ws.onmessage = (ev) => {
-      let msg: Record<string, unknown>;
-      try {
-        msg = JSON.parse(ev.data as string);
-      } catch {
+      if (typeof ev.data === 'string') {
+        try {
+          this.route(JSON.parse(ev.data));
+        } catch {
+          return;
+        }
         return;
       }
-      this.route(msg);
+      const frame = decodeTickFrame(ev.data as ArrayBuffer);
+      if (!frame) return;
+      const { kind, t, p, s } = frame;
+      if (!t.length) return;
+      if (kind === KIND_HISTORY) this.handlers.history?.(t, p, s);
+      else if (kind === KIND_TICKS) this.handlers.ticks?.(t, p, s);
     };
     ws.onerror = () => this.handlers.error?.('Connection to replay server failed');
     ws.onclose = () => {
@@ -80,16 +114,6 @@ export class ReplayClient {
       case 'reset':
         this.handlers.reset?.();
         break;
-      case 'history':
-      case 'ticks': {
-        const t = msg.t as number[];
-        const p = msg.p as number[];
-        const s = msg.s as number[];
-        if (!t?.length) return;
-        if (msg.type === 'history') this.handlers.history?.(t, p, s);
-        else this.handlers.ticks?.(t, p, s);
-        break;
-      }
       case 'state':
         this.handlers.state?.(msg as unknown as ReplayStateMsg);
         break;

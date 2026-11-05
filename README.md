@@ -180,14 +180,24 @@ Client → server:
 Server → client:
 
 ```jsonc
-{"type":"session","symbol":"EURUSD","digits":5,"start":...,"end":...,"time":...,"tickCount":95938}
+{"type":"session","symbol":"XAUUSD","digits":2,"start":...,"end":...,"time":...,"tickCount":348929}
 {"type":"reset"}
-{"type":"history","t":[...],"p":[...],"s":[...],"count":5000}
-{"type":"ticks","t":[...],"p":[...],"s":[...],"time":...}
 {"type":"state","time":...,"speed":10,"paused":false,"ended":false}
 ```
 
-Ticks are columnar (parallel arrays) and chunked at 5,000 for prehistory.
+Tick data arrives as *binary WebSocket frames*, not JSON:
+
+```
+u8  kind  (1 = history, 2 = replayed ticks), 3x reserved
+u32 count
+f64 cursor time when the batch was cut
+then count Float64 times, prices, sizes (little-endian)   → 16 + 24·count bytes
+```
+
+History comes first in 65,536-tick chunks so the UI can paint while it loads;
+live ticks stream in paced batches. Decoding is a plain `Float64Array` cast on
+the client — no parse step — and the three columns share one buffer that is
+transferred zero-copy into the candle-builder worker.
 
 ## Data
 
@@ -226,7 +236,7 @@ new symbols.
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest      # 16 tests
+cd backend && .venv/bin/python -m pytest      # 22 tests
 cd frontend && npm run typecheck && npm run build
 ```
 
@@ -264,8 +274,8 @@ scripts/build_backend.sh
    magnet mode, copy/paste, JSON import/export.
 5. **Multi-window** – real Electron pop-out windows (currently tabs/windows of
    the same origin), window layout persistence.
-6. **Performance** – binary tick frames (Float64Array over WS) instead of JSON
-   for 1000× replay of dense tapes; typed-array bar storage with columnar
-   buffers instead of per-bar objects.
+6. **Performance** – typed-array bar storage with columnar buffers instead of
+   per-bar objects in the renderer. *(Binary tick frames are done: Float64Array
+   over WS, zero-copy transfer into the worker.)*
 7. **Packaging** – verify PyInstaller + electron-builder on Windows
    (`linux` targets verified), an app icon, code signing, auto-update.

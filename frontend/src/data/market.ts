@@ -67,8 +67,24 @@ export class MarketData {
     return this.bars.get(tf) ?? EMPTY;
   }
 
-  append(t: number[], p: number[], s: number[]): void {
+  append(t: ArrayLike<number>, p: ArrayLike<number>, s: ArrayLike<number>): void {
     if (!t.length) return;
+    // Binary frames arrive as three Float64Array views on ONE ArrayBuffer.
+    // Transfer that buffer to the worker once: zero clone, and the main
+    // thread never touches the samples again.
+    if (
+      t instanceof Float64Array &&
+      p instanceof Float64Array &&
+      s instanceof Float64Array
+    ) {
+      const shared =
+        p.buffer === t.buffer && (s as Float64Array).buffer === t.buffer;
+      this.worker.postMessage(
+        { type: 'append', t, p, s },
+        shared ? [t.buffer] : [],
+      );
+      return;
+    }
     this.worker.postMessage({ type: 'append', t, p, s });
   }
 

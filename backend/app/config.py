@@ -67,5 +67,8 @@ DATASET_DAYS = 45
 # Replay loop cadence and max ticks per websocket frame.
 FRAME_MS = 50
 MAX_TICKS_PER_FRAME = 20_000
-# History is streamed in chunks so the UI can start working immediately.
-HISTORY_CHUNK = 5_000
+
+# History is streamed in batches the client aggregates per chunk. 64k ticks
+# keeps the per-chunk overhead low without pulling a whole session into one
+# frame or starving the event loop.
+HISTORY_CHUNK = 65_536

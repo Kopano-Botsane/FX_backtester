@@ -39,7 +39,7 @@ function reset(): void {
   ctx.postMessage({ type: 'reset' });
 }
 
-function append(t: number[], p: number[], s: number[]): void {
+function append(t: ArrayLike<number>, p: ArrayLike<number>, s: ArrayLike<number>): void {
   if (!t.length) return;
 
   const changed: string[] = [];
@@ -98,7 +98,7 @@ function append(t: number[], p: number[], s: number[]): void {
 }
 
 ctx.onmessage = (ev: MessageEvent) => {
-  const msg = ev.data as { type: string; t?: number[]; p?: number[]; s?: number[] };
+  const msg = ev.data as { type: string; t?: ArrayLike<number>; p?: ArrayLike<number>; s?: ArrayLike<number> };
   if (msg.type === 'append' && msg.t && msg.p) {
     append(msg.t, msg.p, msg.s ?? []);
   } else if (msg.type === 'reset') {

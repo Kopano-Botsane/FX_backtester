@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import struct
 import sys
 import threading
 import time
@@ -124,19 +125,29 @@ def session(symbol: str, day: str) -> dict[str, object]:
     }
 
 
-def encode(batch: Ticks, digits: int) -> dict[str, list]:
-    """Compact JSON payload: parallel arrays, prices rounded to instrument digits."""
-    return {
-        "t": batch.t.tolist(),
-        "p": np.round(batch.p, digits).tolist(),
-        "s": np.round(batch.s, 4).tolist(),
-    }
+# Binary tick frame layout (little-endian, zero-copy friendly on decode):
+#   u8  kind (1 = history, 2 = ticks), 3x reserved, u32 count,
+#   f64 cursor time when the batch was cut, then count Float64 times,
+#   count Float64 prices, count Float64 sizes — 16 + 24*count bytes.
+TICK_HDR = struct.Struct("<B3xId")
+KIND_HISTORY = 1
+KIND_TICKS = 2
 
 
-async def send_ticks(ws: WebSocket, batch: Ticks, digits: int, kind: str, when: int) -> None:
-    payload = encode(batch, digits)
-    payload.update({"type": kind, "time": when, "count": len(batch)})
-    await ws.send_json(payload)
+def encode_binary(batch: Ticks, kind: int, when: float) -> bytes:
+    n = len(batch.t)
+    if n == 0:
+        return TICK_HDR.pack(kind, 0, float(when))
+    hdr = np.frombuffer(TICK_HDR.pack(kind, n, float(when)), dtype=np.uint8)
+    cols = np.empty((3, n), dtype="<f8")
+    cols[0] = batch.t
+    cols[1] = batch.p
+    cols[2] = batch.s
+    return hdr.tobytes() + cols.tobytes()
+
+
+async def send_ticks(ws: WebSocket, batch: Ticks, kind: int, when: int) -> None:
+    await ws.send_bytes(encode_binary(batch, kind, when))
 
 
 @app.websocket("/ws/replay")
@@ -228,7 +239,7 @@ async def replay_socket(ws: WebSocket) -> None:
                     await ws.send_json({"type": "reset"})
                     for offset in range(0, len(history), HISTORY_CHUNK):
                         chunk = history.slice(offset, offset + HISTORY_CHUNK)
-                        await send_ticks(ws, chunk, digits, "history", engine.time)
+                        await send_ticks(ws, chunk, KIND_HISTORY, engine.time)
                         await asyncio.sleep(0)
                     await push_state(force=True)
                     continue
@@ -251,7 +262,7 @@ async def replay_socket(ws: WebSocket) -> None:
                     history = engine.history
                     for offset in range(0, len(history), HISTORY_CHUNK):
                         chunk = history.slice(offset, offset + HISTORY_CHUNK)
-                        await send_ticks(ws, chunk, digits, "history", engine.time)
+                        await send_ticks(ws, chunk, KIND_HISTORY, engine.time)
                         await asyncio.sleep(0)
                     last_state = None
                     await push_state(force=True)
@@ -267,7 +278,7 @@ async def replay_socket(ws: WebSocket) -> None:
             if engine is not None and not paused and not engine.ended:
                 batch = engine.advance(wall_ms)
                 if len(batch):
-                    await send_ticks(ws, batch, digits, "ticks", engine.time)
+                    await send_ticks(ws, batch, KIND_TICKS, engine.time)
                 await push_state()
             elif engine is not None and engine.ended and last_state is None:
                 paused = True
