@@ -17,6 +17,7 @@ frontend/.vite/
 
 # Local market data (regenerated on demand; real exports stay local)
 backend/data/ticks/
+backend/data/bars/
 
 # Editors / OS
 .DS_Store

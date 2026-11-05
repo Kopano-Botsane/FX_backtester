@@ -67,6 +67,19 @@ export class MarketData {
     return this.bars.get(tf) ?? EMPTY;
   }
 
+  /** Inject pre-aggregated OHLCV bars directly (for prehistory). */
+  preloadBars(tf: TF, bars: Bar[]): void {
+    if (!bars.length) return;
+    let arr = this.bars.get(tf);
+    if (!arr) {
+      arr = [];
+      this.bars.set(tf, arr);
+    }
+    // Prepend: prehistory bars come before any replay bars
+    arr.unshift(...bars);
+    this.notify(tf);
+  }
+
   append(t: ArrayLike<number>, p: ArrayLike<number>, s: ArrayLike<number>): void {
     if (!t.length) return;
     // Binary frames arrive as three Float64Array views on ONE ArrayBuffer.

@@ -357,6 +357,26 @@ class App implements ChartHost {
     if (cfg.end) params.set('end', cfg.end);
     const info = await getJSON<SessionInfo>(`/api/session?${params.toString()}`);
 
+    // Fetch prehistory bars for the finest timeframe (for immediate rendering)
+    const panes = this.store.state.panes;
+    const finestTf = panes.length
+      ? (['1s', '5s', '15s', '1m', '5m', '15m', '30m', '1h', '4h', '1d'] as TF[]).find(
+          (tf) => panes.some((p) => p.tf === tf)
+        ) ?? '1m'
+      : '1m';
+
+    const barsParams = new URLSearchParams({
+      symbol: cfg.symbol,
+      tf: finestTf,
+      start: cfg.start,
+      historyDays: String(cfg.historyDays),
+    });
+    if (cfg.end) barsParams.set('end', cfg.end);
+    const barsResp = await getJSON<{
+      preBars: { t: number[]; o: number[]; h: number[]; l: number[]; c: number[]; v: number[] } | null;
+      replayDaysList: string[];
+    }>(`/api/bars?${barsParams.toString()}`);
+
     // Hide landing, show main app
     this.landingPage.hide();
 
@@ -375,7 +395,6 @@ class App implements ChartHost {
     ++this.sessionToken;
 
     // Configure panes for the session
-    const panes = this.store.state.panes;
     const finest = panes.length ? Math.min(...panes.map((p) => TF_MS[p.tf])) : 60_000;
     const cols = panes.length <= 1 ? 1 : 2;
     const paneWidth = Math.max(240, (window.innerWidth - 24) / cols);
@@ -394,8 +413,28 @@ class App implements ChartHost {
     this.market.reset();
     this.store.emit();
 
-    // Subscribe with the full days list and balance
-    this.replay.subscribe(info.symbol, info.days, info.start, this.store.state.replay.speed, false, cfg.balance);
+    // Preload prehistory bars (if any)
+    if (barsResp.preBars && barsResp.preBars.t.length > 0) {
+      const bars = barsResp.preBars.t.map((t, i) => ({
+        t,
+        o: barsResp.preBars!.o[i],
+        h: barsResp.preBars!.h[i],
+        l: barsResp.preBars!.l[i],
+        c: barsResp.preBars!.c[i],
+        v: barsResp.preBars!.v[i],
+      }));
+      this.market.preloadBars(finestTf, bars);
+    }
+
+    // Subscribe with ONLY replay days (prehistory is already loaded via bars)
+    this.replay.subscribe(
+      info.symbol,
+      barsResp.replayDaysList.length > 0 ? barsResp.replayDaysList : info.days,
+      info.start,
+      this.store.state.replay.speed,
+      false,
+      cfg.balance
+    );
 
     // Store session info for restart
     (this as any).lastSessionConfig = cfg;

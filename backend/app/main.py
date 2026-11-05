@@ -29,7 +29,7 @@ from .config import (
 from .replay import ReplayEngine
 from .orders import Book
 from . import synth
-from .store import CompositeStore, Ticks
+from .store import CompositeStore, Ticks, Bars, TF_TO_MS, BAR_TIMEFRAMES
 
 app = FastAPI(title="Backtester Replay API", version=__version__)
 app.add_middleware(
@@ -141,6 +141,58 @@ def days(symbol: str) -> dict[str, object]:
     return {
         "symbol": symbol,
         "days": [d.isoformat() for d in store.session_days(symbol)],
+    }
+
+
+@app.get("/api/bars")
+def bars(
+    symbol: str,
+    tf: str,
+    start: str,
+    end: str | None = None,
+    historyDays: int = 5,
+) -> dict[str, object]:
+    """Return pre-aggregated OHLCV bars for fast prehistory rendering.
+
+    Uses the same day-range logic as /api/session but returns bars instead of
+    resolving to a tick tape. The client uses this for prehistory (days before
+    the replay start) and switches to WS ticks for the replay period.
+    """
+    if tf not in TF_TO_MS:
+        raise HTTPException(status_code=400, detail=f"unsupported timeframe: {tf}")
+    symbol = parse_symbol(symbol)
+    start_day = parse_day(start)
+    end_day = parse_day(end) if end else None
+    if historyDays < 0 or historyDays > 60:
+        raise HTTPException(status_code=400, detail="historyDays must be 0-60")
+    try:
+        days = store.days_for_range(symbol, start_day, end_day, historyDays)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"no data on {exc.args[0]}"
+        ) from None
+
+    # Split into prehistory (before start_day) and replay days
+    pre_days = [d for d in days if d < start_day]
+    replay_days = [d for d in days if d >= start_day]
+
+    pre_bars = store.load_bars(symbol, tf, pre_days) if pre_days else None
+
+    return {
+        "symbol": symbol,
+        "tf": tf,
+        "digits": INSTRUMENTS[symbol].digits,
+        "prehistoryDays": len(pre_days),
+        "replayDays": len(replay_days),
+        "preBars": {
+            "t": pre_bars.t.tolist(),
+            "o": pre_bars.o.tolist(),
+            "h": pre_bars.h.tolist(),
+            "l": pre_bars.l.tolist(),
+            "c": pre_bars.c.tolist(),
+            "v": pre_bars.v.tolist(),
+        } if pre_bars is not None and len(pre_bars) > 0 else None,
+        "replayDaysList": [d.isoformat() for d in replay_days],
     }
 
 

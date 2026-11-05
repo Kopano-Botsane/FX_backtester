@@ -1,8 +1,11 @@
-"""Tick storage layer.
+"""Tick & bar storage layer.
 
 The MVP ships with a disk-cached synthetic feed and a CSV reader for real
 exports. Both satisfy the same :class:`TickStore` interface, so swapping in a
 TimescaleDB/ClickHouse-backed implementation later is a drop-in change.
+
+Bar CSVs (OHLCV) are written alongside tick CSVs during MT5 import for fast
+prehistory loading. Bar files live under ``backend/data/bars/<SYMBOL>/<TF>/<YYYY-MM-DD>.csv.gz``.
 """
 
 from __future__ import annotations
@@ -18,6 +21,24 @@ import numpy as np
 
 from .config import CACHE_DIR, DATA_DIR, DATASET_DAYS, INSTRUMENTS
 from . import synth
+
+
+@dataclass(frozen=True)
+class Bars:
+    """Columnar bar batch. Sorted ascending by ``t`` (epoch milliseconds, bar open time)."""
+    t: np.ndarray      # int64   bar open time (ms)
+    o: np.ndarray      # float64 open
+    h: np.ndarray      # float64 high
+    l: np.ndarray      # float64 low
+    c: np.ndarray      # float64 close
+    v: np.ndarray      # float64 volume (sum of tick sizes)
+
+    def __len__(self) -> int:
+        return int(self.t.size)
+
+    def slice(self, start: int, stop: int) -> "Bars":
+        return Bars(self.t[start:stop], self.o[start:stop], self.h[start:stop],
+                    self.l[start:stop], self.c[start:stop], self.v[start:stop])
 
 
 @dataclass(frozen=True)
@@ -37,6 +58,141 @@ class Ticks:
     def with_times_before(self, cutoff_ms: int) -> "Ticks":
         idx = int(np.searchsorted(self.t, cutoff_ms, side="left"))
         return self.slice(0, idx)
+
+
+# Supported timeframes for pre-aggregated bars
+BAR_TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h", "1d")
+TF_TO_MS = {
+    "1m": 60_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "30m": 1_800_000,
+    "1h": 3_600_000,
+    "4h": 14_400_000,
+    "1d": 86_400_000,
+}
+
+
+def aggregate_to_tf(ticks: Ticks, tf: str) -> Bars:
+    """Vectorized tick -> OHLCV aggregation for a single timeframe.
+
+    Uses numpy searchsorted on bucket boundaries; no Python loops.
+    """
+    if len(ticks) == 0:
+        empty = np.empty(0)
+        return Bars(empty.astype(np.int64), empty, empty, empty, empty, empty)
+
+    ms = TF_TO_MS[tf]
+    # Bucket start times (floor to TF boundary)
+    bucket_start = (ticks.t // ms) * ms
+    # Unique buckets and their indices
+    uniq, first_idx = np.unique(bucket_start, return_index=True)
+    # Append sentinel for the last bucket
+    idx = np.append(first_idx, len(ticks.t))
+
+    o = ticks.p[first_idx]
+    c = ticks.p[idx[1:] - 1]
+    # High/low/volume per bucket via reduceat (handle single-tick buckets)
+    h = np.maximum.reduceat(ticks.p, first_idx)[:-1]
+    l = np.minimum.reduceat(ticks.p, first_idx)[:-1]
+    v = np.add.reduceat(ticks.s, first_idx)[:-1]
+
+    # Ensure all arrays have the same length (reduceat edge case with single-element buckets)
+    n = len(uniq)
+    if len(h) != n:
+        # Fallback: compute per-bucket using a loop for the problematic buckets
+        h = np.empty(n, dtype=np.float64)
+        l = np.empty(n, dtype=np.float64)
+        v = np.empty(n, dtype=np.float64)
+        for i in range(n):
+            start = first_idx[i]
+            end = idx[i + 1]
+            bucket_prices = ticks.p[start:end]
+            bucket_sizes = ticks.s[start:end]
+            h[i] = float(np.max(bucket_prices))
+            l[i] = float(np.min(bucket_prices))
+            v[i] = float(np.sum(bucket_sizes))
+
+    return Bars(uniq.astype(np.int64), o, h, l, c, v)
+
+
+def write_bars_csv(path: Path, bars: Bars) -> None:
+    """Write bars to compressed CSV: t,o,h,l,c,v (t = epoch ms)."""
+    if len(bars) == 0:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp.csv.gz")
+    opener = gzip.open
+    with opener(tmp, "wt", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["t", "o", "h", "l", "c", "v"])
+        for i in range(len(bars)):
+            writer.writerow([
+                int(bars.t[i]),
+                float(bars.o[i]),
+                float(bars.h[i]),
+                float(bars.l[i]),
+                float(bars.c[i]),
+                float(bars.v[i]),
+            ])
+    tmp.replace(path)
+
+
+def read_bars_csv(path: Path) -> Bars:
+    """Read bars from compressed CSV."""
+    opener = gzip.open if path.suffix == ".gz" else open
+    ts, os_, hs, ls, cs, vs = [], [], [], [], [], []
+    with opener(path, "rt", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            try:
+                ts.append(int(row["t"]))
+                os_.append(float(row["o"]))
+                hs.append(float(row["h"]))
+                ls.append(float(row["l"]))
+                cs.append(float(row["c"]))
+                vs.append(float(row["v"]))
+            except (ValueError, KeyError):
+                continue
+    if not ts:
+        empty = np.empty(0)
+        return Bars(empty.astype(np.int64), empty, empty, empty, empty, empty)
+    return Bars(
+        np.asarray(ts, dtype=np.int64),
+        np.asarray(os_, dtype=np.float64),
+        np.asarray(hs, dtype=np.float64),
+        np.asarray(ls, dtype=np.float64),
+        np.asarray(cs, dtype=np.float64),
+        np.asarray(vs, dtype=np.float64),
+    )
+
+
+class BarStore(Protocol):
+    def load(self, symbol: str, tf: str, day: date) -> Bars: ...
+    def path_for(self, symbol: str, tf: str, day: date) -> Path | None: ...
+
+
+class CsvBarStore:
+    """Reads pre-aggregated bars from ``backend/data/bars/<SYMBOL>/<TF>/<YYYY-MM-DD>.csv[.gz]``."""
+
+    def __init__(self, data_dir: Path = DATA_DIR) -> None:
+        self.data_dir = data_dir
+
+    def path_for(self, symbol: str, tf: str, day: date) -> Path | None:
+        if tf not in TF_TO_MS:
+            return None
+        base = self.data_dir / "bars" / symbol / tf
+        for name in (f"{day.isoformat()}.csv", f"{day.isoformat()}.csv.gz"):
+            candidate = base / name
+            if candidate.exists():
+                return candidate
+        return None
+
+    def load(self, symbol: str, tf: str, day: date) -> Bars | None:
+        path = self.path_for(symbol, tf, day)
+        if path is None:
+            return None
+        return read_bars_csv(path)
 
 
 class TickStore(Protocol):
@@ -112,8 +268,22 @@ class CsvTickStore:
                     continue  # skip blank/junk rows
         t = np.asarray(ts, dtype=np.int64)
         order = np.argsort(t, kind="stable")
-        return Ticks(t[order], np.asarray(px, dtype=np.float64)[order],
+        ticks = Ticks(t[order], np.asarray(px, dtype=np.float64)[order],
                      np.asarray(sz, dtype=np.float64)[order])
+
+        # Lazily generate & cache bar CSVs for fast prehistory loading
+        self._ensure_bars_for_day(symbol, day, ticks)
+        return ticks
+
+    def _ensure_bars_for_day(self, symbol: str, day: date, ticks: Ticks) -> None:
+        """Generate bar CSVs for all timeframes if they don't exist."""
+        for tf in BAR_TIMEFRAMES:
+            bar_path = self.data_dir / "bars" / symbol / tf / f"{day.isoformat()}.csv.gz"
+            if bar_path.exists():
+                continue
+            bars = aggregate_to_tf(ticks, tf)
+            if len(bars) > 0:
+                write_bars_csv(bar_path, bars)
 
 
 def _parse_ts(value: str) -> int:
@@ -132,6 +302,7 @@ class CompositeStore:
 
     def __init__(self) -> None:
         self.csv = CsvTickStore()
+        self.bars = CsvBarStore()
         self.synthetic = SyntheticTickStore()
 
     def load(self, symbol: str, day: date) -> Ticks:
@@ -210,6 +381,36 @@ class CompositeStore:
             np.concatenate([p.s for p in parts]),
         )
 
+    def load_bars(self, symbol: str, tf: str, days: list[date]) -> Bars:
+        """Concatenate pre-aggregated bars for the given days."""
+        if not days:
+            raise ValueError("no days")
+        if tf not in TF_TO_MS:
+            raise ValueError(f"unsupported timeframe: {tf}")
+        parts = []
+        for d in days:
+            bars = self.bars.load(symbol, tf, d)
+            if bars is None or len(bars) == 0:
+                # Fall back to synthetic ticks and aggregate on the fly
+                ticks = self.synthetic.load(symbol, d)
+                if len(ticks) > 0:
+                    bars = aggregate_to_tf(ticks, tf)
+            if bars is not None and len(bars) > 0:
+                parts.append(bars)
+        if not parts:
+            empty = np.empty(0)
+            return Bars(empty.astype(np.int64), empty, empty, empty, empty, empty)
+        if len(parts) == 1:
+            return parts[0]
+        return Bars(
+            np.concatenate([p.t for p in parts]),
+            np.concatenate([p.o for p in parts]),
+            np.concatenate([p.h for p in parts]),
+            np.concatenate([p.l for p in parts]),
+            np.concatenate([p.c for p in parts]),
+            np.concatenate([p.v for p in parts]),
+        )
+
 
 def default_start_ms(symbol: str, day: date) -> int:
     """Start replay ~35% into the session so the chart opens with history.
@@ -224,9 +425,17 @@ def default_start_ms(symbol: str, day: date) -> int:
 
 __all__ = [
     "Ticks",
+    "Bars",
     "TickStore",
+    "BarStore",
     "SyntheticTickStore",
     "CsvTickStore",
+    "CsvBarStore",
     "CompositeStore",
+    "aggregate_to_tf",
+    "write_bars_csv",
+    "read_bars_csv",
+    "BAR_TIMEFRAMES",
+    "TF_TO_MS",
     "default_start_ms",
 ]
