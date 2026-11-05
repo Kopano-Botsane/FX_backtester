@@ -1,10 +1,15 @@
 /// <reference lib="webworker" />
-import { TF_LIST, TF_MS, type Bar } from '../types';
+import { TF_LIST, TF_MS, type Bar, type TF } from '../types';
 
 /**
  * Candle builder. Owns the raw tape and aggregates it into every timeframe
  * simultaneously, so switching a pane's timeframe needs no refetch.
  *
+ * Protocol in:
+ *   {type:'append', t[], p[], s[]}
+ *   {type:'preload', tf, bars[]}            // seed prehistory bars before ticks
+ *   {type:'truncate', time}                 // seek: drop bars at/after cursor
+ *   {type:'reset'}
  * Protocol out:
  *   {type:'reset'}
  *   {type:'bars', tf, startIndex, bars[]}   // replaces/happens at startIndex
@@ -30,6 +35,43 @@ function stateFor(tf: string): TFState {
     states.set(tf, st);
   }
   return st;
+}
+
+function preload(tf: TF, bars: Bar[]): void {
+  // Seed a timeframe with prehistory bars so tick aggregation continues from
+  // them instead of restarting from an empty series (which would wipe the
+  // prehistory on the main thread via the startIndex-truncation in 'bars').
+  const st = stateFor(tf);
+  st.bars = bars.slice();
+  st.emitted = st.bars.length;
+  // Give the main thread the seeded series through the normal path.
+  ctx.postMessage({ type: 'bars', tf, startIndex: 0, bars: st.bars });
+}
+
+function truncate(time: number): void {
+  // Seek: drop bars at/after the cursor's bar start in every timeframe. The
+  // bar containing the cursor is rebuilt from the history chunks the server
+  // re-sends after a seek. Bars before the cursor — including seeded
+  // prehistory — are kept untouched.
+  const changed: TF[] = [];
+  for (const tf of TF_LIST) {
+    const st = stateFor(tf);
+    const cutoff = Math.floor(time / TF_MS[tf]) * TF_MS[tf];
+    const bars = st.bars;
+    let n = bars.length;
+    while (n > 0 && bars[n - 1].t >= cutoff) n--;
+    if (n < bars.length) {
+      bars.length = n;
+      st.emitted = Math.min(st.emitted, n);
+      changed.push(tf);
+    }
+  }
+  for (const tf of changed) {
+    // Empty payload with the truncation index: the client cuts its mirror to
+    // this length through the normal 'bars' path.
+    const st = stateFor(tf);
+    ctx.postMessage({ type: 'bars', tf, startIndex: st.emitted, bars: [] });
+  }
 }
 
 function reset(): void {
@@ -98,9 +140,21 @@ function append(t: ArrayLike<number>, p: ArrayLike<number>, s: ArrayLike<number>
 }
 
 ctx.onmessage = (ev: MessageEvent) => {
-  const msg = ev.data as { type: string; t?: ArrayLike<number>; p?: ArrayLike<number>; s?: ArrayLike<number> };
+  const msg = ev.data as {
+    type: string;
+    t?: ArrayLike<number>;
+    p?: ArrayLike<number>;
+    s?: ArrayLike<number>;
+    tf?: TF;
+    bars?: Bar[];
+    time?: number;
+  };
   if (msg.type === 'append' && msg.t && msg.p) {
     append(msg.t, msg.p, msg.s ?? []);
+  } else if (msg.type === 'preload' && msg.tf && msg.bars) {
+    preload(msg.tf, msg.bars);
+  } else if (msg.type === 'truncate' && typeof msg.time === 'number') {
+    truncate(msg.time);
   } else if (msg.type === 'reset') {
     reset();
   }

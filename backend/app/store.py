@@ -92,12 +92,13 @@ def aggregate_to_tf(ticks: Ticks, tf: str) -> Bars:
 
     o = ticks.p[first_idx]
     c = ticks.p[idx[1:] - 1]
-    # High/low/volume per bucket via reduceat (handle single-tick buckets)
-    h = np.maximum.reduceat(ticks.p, first_idx)[:-1]
-    l = np.minimum.reduceat(ticks.p, first_idx)[:-1]
-    v = np.add.reduceat(ticks.s, first_idx)[:-1]
+    # High/low/volume per bucket via reduceat — one reduction per bucket,
+    # including single-tick buckets (reduceat with strictly increasing
+    # indices returns exactly len(first_idx) results).
+    h = np.maximum.reduceat(ticks.p, first_idx)
+    l = np.minimum.reduceat(ticks.p, first_idx)
+    v = np.add.reduceat(ticks.s, first_idx)
 
-    # Ensure all arrays have the same length (reduceat edge case with single-element buckets)
     n = len(uniq)
     if len(h) != n:
         # Fallback: compute per-bucket using a loop for the problematic buckets

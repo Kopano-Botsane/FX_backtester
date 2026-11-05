@@ -10,6 +10,7 @@ import {
   TF_MS,
   EMPTY_PORTFOLIO,
   type AppState,
+  type Bar,
   type Drawing,
   type DrawingKind,
   type EquityPoint,
@@ -230,7 +231,10 @@ class App implements ChartHost {
       this.store.emit();
     });
     this.replay.on('reset', () => {
-      this.market.reset();
+      // The server sends 'reset' on session start and on seek, right before
+      // re-sending history chunks. The market must NOT be wiped here: seeded
+      // prehistory bars must survive session start, and seeks truncate via
+      // market.truncateTo() before the WS seek command is sent.
       this.store.state.portfolio = { ...EMPTY_PORTFOLIO };
       this.store.state.trade.equity = [];
       this.store.state.replay.status = 'loading';
@@ -357,25 +361,46 @@ class App implements ChartHost {
     if (cfg.end) params.set('end', cfg.end);
     const info = await getJSON<SessionInfo>(`/api/session?${params.toString()}`);
 
-    // Fetch prehistory bars for the finest timeframe (for immediate rendering)
+    // Fetch prehistory bars for every pane timeframe in parallel. The
+    // pre-aggregated CSVs are tiny, so each request is fast. Timeframes the
+    // backend cannot aggregate (1s, 5s, 15s) are skipped, and a failed fetch
+    // never aborts the session.
     const panes = this.store.state.panes;
-    const finestTf = panes.length
-      ? (['1s', '5s', '15s', '1m', '5m', '15m', '30m', '1h', '4h', '1d'] as TF[]).find(
-          (tf) => panes.some((p) => p.tf === tf)
-        ) ?? '1m'
-      : '1m';
+    const BAR_TFS = new Set<TF>(['1m', '5m', '15m', '30m', '1h', '4h', '1d']);
+    const barTfs = [...new Set(panes.map((p) => p.tf))].filter((tf) => BAR_TFS.has(tf));
 
-    const barsParams = new URLSearchParams({
-      symbol: cfg.symbol,
-      tf: finestTf,
-      start: cfg.start,
-      historyDays: String(cfg.historyDays),
-    });
-    if (cfg.end) barsParams.set('end', cfg.end);
-    const barsResp = await getJSON<{
+    type BarsResponse = {
       preBars: { t: number[]; o: number[]; h: number[]; l: number[]; c: number[]; v: number[] } | null;
       replayDaysList: string[];
-    }>(`/api/bars?${barsParams.toString()}`);
+    };
+    const preBarsByTf = new Map<TF, Bar[]>();
+    let replayDaysList: string[] = [];
+    await Promise.all(
+      barTfs.map(async (tf) => {
+        const params = new URLSearchParams({
+          symbol: cfg.symbol,
+          tf,
+          start: cfg.start,
+          historyDays: String(cfg.historyDays),
+        });
+        if (cfg.end) params.set('end', cfg.end);
+        try {
+          const resp = await getJSON<BarsResponse>(`/api/bars?${params.toString()}`);
+          if (resp.replayDaysList.length > 0 && replayDaysList.length === 0) {
+            replayDaysList = resp.replayDaysList;
+          }
+          if (resp.preBars && resp.preBars.t.length > 0) {
+            const { t, o, h, l, c, v } = resp.preBars;
+            preBarsByTf.set(
+              tf,
+              t.map((time, i) => ({ t: time, o: o[i], h: h[i], l: l[i], c: c[i], v: v[i] })),
+            );
+          }
+        } catch {
+          // No prehistory for this timeframe — the session still works.
+        }
+      }),
+    );
 
     // Hide landing, show main app
     this.landingPage.hide();
@@ -413,23 +438,15 @@ class App implements ChartHost {
     this.market.reset();
     this.store.emit();
 
-    // Preload prehistory bars (if any)
-    if (barsResp.preBars && barsResp.preBars.t.length > 0) {
-      const bars = barsResp.preBars.t.map((t, i) => ({
-        t,
-        o: barsResp.preBars!.o[i],
-        h: barsResp.preBars!.h[i],
-        l: barsResp.preBars!.l[i],
-        c: barsResp.preBars!.c[i],
-        v: barsResp.preBars!.v[i],
-      }));
-      this.market.preloadBars(finestTf, bars);
+    // Preload prehistory bars for every timeframe (if any)
+    for (const [tf, bars] of preBarsByTf) {
+      this.market.preloadBars(tf, bars);
     }
 
     // Subscribe with ONLY replay days (prehistory is already loaded via bars)
     this.replay.subscribe(
       info.symbol,
-      barsResp.replayDaysList.length > 0 ? barsResp.replayDaysList : info.days,
+      replayDaysList.length > 0 ? replayDaysList : info.days,
       info.start,
       this.store.state.replay.speed,
       false,
@@ -474,6 +491,10 @@ class App implements ChartHost {
       pane.autoScale = true;
     }
     this.store.emit();
+    // Drop replay bars at/after the seek target; the server re-sends history
+    // ticks from the tape start which rebuild the cursor bar. Seeded
+    // prehistory bars before the cursor are kept.
+    this.market.truncateTo(target);
     this.replay.seek(target);
   }
 

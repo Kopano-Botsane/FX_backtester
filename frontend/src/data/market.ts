@@ -70,14 +70,20 @@ export class MarketData {
   /** Inject pre-aggregated OHLCV bars directly (for prehistory). */
   preloadBars(tf: TF, bars: Bar[]): void {
     if (!bars.length) return;
-    let arr = this.bars.get(tf);
-    if (!arr) {
-      arr = [];
-      this.bars.set(tf, arr);
-    }
-    // Prepend: prehistory bars come before any replay bars
-    arr.unshift(...bars);
+    // Seed the worker: it owns bar state, so replay ticks aggregate on top of
+    // the prehistory instead of restarting empty (which would wipe these bars
+    // once the first 'bars' message with startIndex 0 arrives).
+    this.worker.postMessage({ type: 'preload', tf, bars });
+    // Mirror immediately so panes can render before the worker round-trip.
+    // The worker's echo is idempotent: startIndex 0 truncates and re-pushes
+    // the same series.
+    this.bars.set(tf, bars.slice());
     this.notify(tf);
+  }
+
+  /** Seek: tell the worker to drop bars at/after the cursor (per timeframe). */
+  truncateTo(time: number): void {
+    this.worker.postMessage({ type: 'truncate', time });
   }
 
   append(t: ArrayLike<number>, p: ArrayLike<number>, s: ArrayLike<number>): void {
