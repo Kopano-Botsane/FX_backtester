@@ -174,7 +174,7 @@ export class ChartPane {
     const pane = this.host.store.pane(this.id);
     if (!pane) return;
     const target = this.host.market.lastTime ?? this.host.store.state.replay.time;
-    this.host.setView(this.id, target + TF_MS[pane.tf], pane.pxPerMs, true);
+    this.host.setView(this.id, this.host.market.gaps.compress(target) + TF_MS[pane.tf], pane.pxPerMs, true);
   }
 
   // ---------------------------------------------------------------- projection
@@ -205,12 +205,16 @@ export class ChartPane {
     }
 
     const span = maxP - minP;
+    // Session-gap calendar: long closed stretches (weekend) compress to a
+    // small epsilon on the x axis. Panes, drawings and the crosshair all
+    // share this mapping through the Projection below.
+    const cal = this.host.market.gaps;
     const proj: Projection = {
       plot,
       digits: this.host.store.state.digits,
-      timeToX: (t) => plotRight - (rightTime - t) * pxPerMs,
+      timeToX: (t) => plotRight - (rightTime - cal.compress(t)) * pxPerMs,
       priceToY: (p) => plot.y + ((maxP - p) / span) * plot.h,
-      xToTime: (x) => rightTime - (plotRight - x) / pxPerMs,
+      xToTime: (x) => cal.uncompress(rightTime - (plotRight - x) / pxPerMs),
       yToPrice: (y) => maxP - ((y - plot.y) / plot.h) * span,
     };
     return { plot, rightTime, pxPerMs, minP, maxP, proj };
@@ -225,9 +229,12 @@ export class ChartPane {
   ): [number, number] | null {
     if (!bars.length) return null;
     const tfMs = TF_MS[pane.tf];
-    const left = rightTime - plot.w / pxPerMs;
+    // The visible display window maps to a raw time range that may include
+    // compressed gaps (no bars there), so slice on raw times.
+    const cal = this.host.market.gaps;
+    const left = cal.uncompress(rightTime - plot.w / pxPerMs);
     let from = lowerBound(bars, left - tfMs);
-    let to = lowerBound(bars, rightTime + tfMs * 2);
+    let to = lowerBound(bars, cal.uncompress(rightTime) + tfMs * 2);
     if (to <= from) {
       from = Math.max(0, bars.length - 60);
       to = bars.length;
@@ -289,7 +296,13 @@ export class ChartPane {
       const margin = pxPerMs > 0 ? 0.02 * (cw / pxPerMs) : 0;
       this.host.patchPane(
         this.id,
-        { pxPerMs, rightTime: anchor + margin, viewReady: true, follow: true, autoScale: true },
+        {
+          pxPerMs,
+          rightTime: this.host.market.gaps.compress(anchor) + margin,
+          viewReady: true,
+          follow: true,
+          autoScale: true,
+        },
         false,
       );
     }
@@ -373,8 +386,10 @@ export class ChartPane {
       ctx.lineTo(plotRight, y);
     }
     const tStep = timeStepFor(pxPerMs);
+    const cal = this.host.market.gaps;
     const tStart = Math.ceil(view.proj.xToTime(plot.x) / tStep) * tStep;
     for (let t = tStart; t <= rightTime + tStep; t += tStep) {
+      if (cal.insideGap(t)) continue; // closed session: no gridline in the gap
       const x = Math.round(view.proj.timeToX(t)) + 0.5;
       if (x < plot.x || x > plotRight) continue;
       ctx.moveTo(x, plot.y);
@@ -505,10 +520,12 @@ export class ChartPane {
 
     ctx.textAlign = 'center';
     const tStep = timeStepFor(pxPerMs);
+    const cal = this.host.market.gaps;
     const tStart = Math.ceil(view.proj.xToTime(plot.x) / tStep) * tStep;
     const label = (t: number) =>
       tStep >= 604_800_000 ? fmtTime(t, 604_800_000) : fmtTime(t, tStep);
     for (let t = tStart; t <= rightTime + tStep; t += tStep) {
+      if (cal.insideGap(t)) continue; // closed session: no label in the gap
       const x = view.proj.timeToX(t);
       if (x < plot.x + 26 || x > plot.x + plot.w - 22) continue;
       ctx.fillText(label(t), x, ch - GUTTER_B / 2);
@@ -875,7 +892,9 @@ export class ChartPane {
       case 'xscale': {
         const factor = clamp(Math.exp((x - drag.startX) * 0.006), 0.05, 60);
         const pxPerMs = clamp(drag.pxPerMs * factor, 1e-8, 0.2);
-        const rightTime = drag.anchorTime + (plot.x + plot.w - drag.startX) / pxPerMs;
+        // Anchor on the compressed axis: raw anchor + display offset.
+        const anchorDisplay = this.host.market.gaps.compress(drag.anchorTime);
+        const rightTime = anchorDisplay + (plot.x + plot.w - drag.startX) / pxPerMs;
         this.host.setView(this.id, rightTime, pxPerMs, false);
         break;
       }
@@ -965,8 +984,9 @@ export class ChartPane {
 
     const factor = clamp(Math.exp(delta * 0.0015), 0.35, 3);
     const pxPerMs = clamp(view.pxPerMs / factor, 1e-8, 0.2);
-    const anchorTime = proj.xToTime(x);
-    const rightTime = anchorTime + (plot.x + plot.w - x) / pxPerMs;
+    // Anchor on the compressed axis: raw anchor + display offset.
+    const anchorDisplay = this.host.market.gaps.compress(proj.xToTime(x));
+    const rightTime = anchorDisplay + (plot.x + plot.w - x) / pxPerMs;
     this.host.setView(this.id, rightTime, pxPerMs, false);
   };
 
@@ -985,7 +1005,7 @@ export class ChartPane {
       const { cw } = this.canvasSize();
       const pxPerMs = cw / (TF_MS[pane.tf] * 130);
       const target = this.host.market.lastTime ?? this.host.store.state.replay.time;
-      this.host.setView(this.id, target + TF_MS[pane.tf] * 2, pxPerMs, true);
+      this.host.setView(this.id, this.host.market.gaps.compress(target) + TF_MS[pane.tf] * 2, pxPerMs, true);
       this.host.patchPane(this.id, { autoScale: true });
       return;
     }

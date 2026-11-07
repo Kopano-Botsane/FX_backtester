@@ -437,22 +437,27 @@ class App implements ChartHost {
     const pxPerMs = clamp(paneWidth / windowMs, 1e-8, 0.2);
     const margin = 0.02 * (paneWidth / pxPerMs);
 
+    // Clear last session's bars + gap calendar first, then seed prehistory so
+    // the calendar is fresh before the panes are positioned on the
+    // compressed axis.
+    this.store.state.sessionKey += 1;
+    this.market.reset();
+    for (const [tf, bars] of preBarsByTf) {
+      this.market.preloadBars(tf, bars);
+    }
+    // Position the right edge on the compressed axis (weekend gaps before the
+    // session start are already collapsed at this point).
+    const startDisplay = this.market.gaps.compress(info.start) + margin;
+
     for (const pane of panes) {
       pane.pxPerMs = pxPerMs;
       pane.plotWidth = paneWidth;
-      pane.rightTime = info.start + margin;
+      pane.rightTime = startDisplay;
       pane.follow = true;
       pane.autoScale = true;
       pane.viewReady = true;
     }
-    this.store.state.sessionKey += 1;
-    this.market.reset();
     this.store.emit();
-
-    // Preload prehistory bars for every timeframe (if any)
-    for (const [tf, bars] of preBarsByTf) {
-      this.market.preloadBars(tf, bars);
-    }
 
     // Subscribe with ONLY replay days (prehistory is already loaded via bars)
     this.replay.subscribe(
@@ -496,8 +501,9 @@ class App implements ChartHost {
     const target = clamp(time, sessionStart, sessionEnd - 1000);
     this.store.state.replay.time = target;
     this.store.state.replay.status = 'loading';
+    const rightTime = this.market.gaps.compress(target);
     for (const pane of this.store.state.panes) {
-      pane.rightTime = target;
+      pane.rightTime = rightTime;
       pane.follow = true;
       pane.autoScale = true;
     }
@@ -537,7 +543,7 @@ class App implements ChartHost {
     if (!source) return;
     for (const pane of this.store.state.panes) pane.follow = true;
     const margin = 0.02 * (source.plotWidth / source.pxPerMs);
-    this.setView(source.id, last + margin, source.pxPerMs, true);
+    this.setView(source.id, this.market.gaps.compress(last) + margin, source.pxPerMs, true);
   }
 
   private toggleSyncTime(): void {
@@ -704,7 +710,7 @@ class App implements ChartHost {
     const followers = this.store.state.panes.filter((p) => p.follow);
     if (!followers.length) return;
     const source = followers[0];
-    const target = last + 0.02 * (source.plotWidth / source.pxPerMs);
+    const target = this.market.gaps.compress(last) + 0.02 * (source.plotWidth / source.pxPerMs);
     if (target > source.rightTime + 1) {
       this.setView(source.id, target, source.pxPerMs);
     }

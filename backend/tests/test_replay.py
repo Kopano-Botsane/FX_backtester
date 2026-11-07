@@ -51,3 +51,25 @@ def test_seek_clamps_to_dataset_start():
     engine = ReplayEngine(make_ticks(10), start_ms=5_000, speed=1)
     engine.seek(-1_000_000)
     assert engine.time == 0
+
+
+def test_advance_fast_forwards_long_gaps():
+    """Dead tape (weekend/holiday) is crossed instantly, not paced."""
+    t = np.concatenate([
+        np.arange(10, dtype=np.int64) * 1_000,
+        3_600_000 + np.arange(5, dtype=np.int64) * 1_000,  # 1-hour tape gap
+    ])
+    p = 100.0 + np.arange(15)
+    ticks = Ticks(t, p, np.ones(15))
+    engine = ReplayEngine(ticks, start_ms=0, speed=10.0)
+    # 1s wall at 10x = 10s virtual: the cursor reaches the end of the live
+    # stretch and the engine has not paced into the gap.
+    batch = engine.advance(1000)
+    assert len(batch) == 10
+    assert engine.time == 10_000
+    # The next tick is an hour of tape away — far beyond MAX_STEP_MS — so a
+    # small advance jumps straight to it instead of crawling for minutes.
+    batch = engine.advance(10)
+    assert len(batch) == 1
+    assert int(batch.t[0]) == 3_600_000
+    assert engine.time == 3_600_100

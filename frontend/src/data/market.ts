@@ -1,4 +1,5 @@
 import type { Bar, TF } from '../types';
+import { GapCalendar, finestBars } from './gaps';
 
 type MarketListener = (tf: TF | null) => void;
 
@@ -10,6 +11,13 @@ export class MarketData {
   readonly worker: Worker;
   private bars = new Map<TF, Bar[]>();
   private listeners = new Set<MarketListener>();
+
+  /**
+   * Session-gap calendar used by the chart projection to collapse weekend
+   * and holiday dead time. Derived from the finest loaded bar series and
+   * cleared together with the market data.
+   */
+  readonly gaps = new GapCalendar();
 
   lastPrice: number | null = null;
   lastTime: number | null = null;
@@ -33,6 +41,7 @@ export class MarketData {
     switch (msg.type) {
       case 'reset': {
         this.bars.clear();
+        this.gaps.reset();
         this.lastPrice = null;
         this.lastTime = null;
         this.tickCount = 0;
@@ -50,6 +59,7 @@ export class MarketData {
         }
         if (startIndex <= arr.length) arr.length = startIndex;
         for (const bar of incoming) arr.push(bar);
+        this.gaps.syncFromBars(finestBars(this.bars));
         this.notify(tf);
         break;
       }
@@ -78,6 +88,7 @@ export class MarketData {
     // The worker's echo is idempotent: startIndex 0 truncates and re-pushes
     // the same series.
     this.bars.set(tf, bars.slice());
+    this.gaps.syncFromBars(finestBars(this.bars));
     this.notify(tf);
   }
 
@@ -111,6 +122,7 @@ export class MarketData {
     this.worker.postMessage({ type: 'reset' });
     // Clear eagerly so a stale frame cannot paint the previous session.
     this.bars.clear();
+    this.gaps.reset();
     this.lastPrice = null;
     this.lastTime = null;
     this.tickCount = 0;

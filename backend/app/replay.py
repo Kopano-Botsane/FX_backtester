@@ -14,6 +14,11 @@ import numpy as np
 from .config import MAX_TICKS_PER_FRAME
 from .store import Ticks
 
+# Virtual-clock gaps longer than this are fast-forwarded instead of paced.
+# Covers daily maintenance breaks (~1h for metals) as well as weekends and
+# multi-day holidays; normal tape silences stay paced.
+MAX_STEP_MS = 10 * 60_000
+
 
 @dataclass
 class ReplayEngine:
@@ -57,6 +62,14 @@ class ReplayEngine:
         if self.ended or wall_ms <= 0:
             return self.ticks.slice(0, 0)
 
+        # Fast-forward across dead tape (overnight maintenance breaks,
+        # weekends, holidays): jump straight to the next real tick instead of
+        # crawling through empty virtual hours at paced speed.
+        if self.ptr < len(self.ticks):
+            next_t = int(self.ticks.t[self.ptr])
+            if next_t - self.time > MAX_STEP_MS:
+                self.time = next_t
+
         self.time = int(self.time + wall_ms * self.speed)
         idx = int(np.searchsorted(self.ticks.t, self.time, side="right"))
 
@@ -73,4 +86,4 @@ class ReplayEngine:
         return batch
 
 
-__all__ = ["ReplayEngine"]
+__all__ = ["ReplayEngine", "MAX_STEP_MS"]
