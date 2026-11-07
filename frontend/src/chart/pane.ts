@@ -127,6 +127,9 @@ export class ChartPane {
     }
 
     this.tfSelect.addEventListener('change', () => {
+      // Keep the current time window: candles just re-aggregate at the new
+      // timeframe, so panes stay x-aligned. Every timeframe carries its own
+      // prehistory now, so no re-framing is needed.
       this.host.patchPane(this.id, { tf: this.tfSelect.value as PaneState['tf'], autoScale: true });
       this.host.focusPane(this.id);
     });

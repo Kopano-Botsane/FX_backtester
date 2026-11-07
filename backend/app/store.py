@@ -15,7 +15,7 @@ import gzip
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Sequence
 
 import numpy as np
 
@@ -392,8 +392,12 @@ class CompositeStore:
         for d in days:
             bars = self.bars.load(symbol, tf, d)
             if bars is None or len(bars) == 0:
-                # Fall back to synthetic ticks and aggregate on the fly
-                ticks = self.synthetic.load(symbol, d)
+                # Fall back to the composite tick store — real exports first,
+                # synthetic in-fill second — and aggregate on the fly. Using
+                # the synthetic store directly would drop real sessions (e.g.
+                # Sunday-evening exports) and desync prehistory prices from
+                # the replay tape.
+                ticks = self.load(symbol, d)
                 if len(ticks) > 0:
                     bars = aggregate_to_tf(ticks, tf)
             if bars is not None and len(bars) > 0:
@@ -411,6 +415,60 @@ class CompositeStore:
             np.concatenate([p.c for p in parts]),
             np.concatenate([p.v for p in parts]),
         )
+
+    def load_bars_multi(
+        self, symbol: str, tfs: Sequence[str], days: list[date]
+    ) -> dict[str, Bars]:
+        """Aggregate one tick tape per day into several timeframes at once.
+
+        Bar CSVs are used where they exist; otherwise the day's ticks load
+        once (real exports first, synthetic in-fill second) and aggregate
+        into every requested timeframe. Real-export days get their bar CSVs
+        written as a side effect of the tick load, so repeated requests hit
+        the CSV cache. Days with no ticks contribute no bars.
+        """
+        if not days:
+            raise ValueError("no days")
+        tfs = [tf for tf in tfs if tf in TF_TO_MS]
+        per_tf: dict[str, list[Bars]] = {tf: [] for tf in tfs}
+        for d in days:
+            by_tf: dict[str, Bars] = {}
+            missing: list[str] = []
+            for tf in tfs:
+                bars = self.bars.load(symbol, tf, d)
+                if bars is not None and len(bars) > 0:
+                    by_tf[tf] = bars
+                else:
+                    missing.append(tf)
+            if missing:
+                ticks = self.load(symbol, d)
+                if len(ticks) > 0:
+                    for tf in missing:
+                        bars = aggregate_to_tf(ticks, tf)
+                        if len(bars) > 0:
+                            by_tf[tf] = bars
+            for tf in tfs:
+                if tf in by_tf:
+                    per_tf[tf].append(by_tf[tf])
+        empty = np.empty(0)
+        out: dict[str, Bars] = {}
+        for tf, parts in per_tf.items():
+            if not parts:
+                out[tf] = Bars(
+                    empty.astype(np.int64), empty, empty, empty, empty, empty
+                )
+            elif len(parts) == 1:
+                out[tf] = parts[0]
+            else:
+                out[tf] = Bars(
+                    np.concatenate([p.t for p in parts]),
+                    np.concatenate([p.o for p in parts]),
+                    np.concatenate([p.h for p in parts]),
+                    np.concatenate([p.l for p in parts]),
+                    np.concatenate([p.c for p in parts]),
+                    np.concatenate([p.v for p in parts]),
+                )
+        return out
 
 
 def default_start_ms(symbol: str, day: date) -> int:

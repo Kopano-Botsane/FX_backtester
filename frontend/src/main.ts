@@ -7,6 +7,7 @@ import { SyncChannel } from './sync';
 import { TradePanel } from './ui/trade';
 import { LandingPage } from './ui/landing';
 import {
+  TF_LIST,
   TF_MS,
   EMPTY_PORTFOLIO,
   type AppState,
@@ -361,46 +362,45 @@ class App implements ChartHost {
     if (cfg.end) params.set('end', cfg.end);
     const info = await getJSON<SessionInfo>(`/api/session?${params.toString()}`);
 
-    // Fetch prehistory bars for every pane timeframe in parallel. The
-    // pre-aggregated CSVs are tiny, so each request is fast. Timeframes the
-    // backend cannot aggregate (1s, 5s, 15s) are skipped, and a failed fetch
-    // never aborts the session.
+    // Fetch prehistory bars for every timeframe in one batch request, so any
+    // pane — or a pane the user switches to another timeframe later — has
+    // history before the replay start without a tick-level history load.
     const panes = this.store.state.panes;
-    const BAR_TFS = new Set<TF>(['1m', '5m', '15m', '30m', '1h', '4h', '1d']);
-    const barTfs = [...new Set(panes.map((p) => p.tf))].filter((tf) => BAR_TFS.has(tf));
-
-    type BarsResponse = {
-      preBars: { t: number[]; o: number[]; h: number[]; l: number[]; c: number[]; v: number[] } | null;
-      replayDaysList: string[];
-    };
+    const barsParams = new URLSearchParams({
+      symbol: cfg.symbol,
+      start: cfg.start,
+      historyDays: String(cfg.historyDays),
+      tfs: TF_LIST.join(','),
+    });
+    if (cfg.end) barsParams.set('end', cfg.end);
     const preBarsByTf = new Map<TF, Bar[]>();
     let replayDaysList: string[] = [];
-    await Promise.all(
-      barTfs.map(async (tf) => {
-        const params = new URLSearchParams({
-          symbol: cfg.symbol,
-          tf,
-          start: cfg.start,
-          historyDays: String(cfg.historyDays),
-        });
-        if (cfg.end) params.set('end', cfg.end);
-        try {
-          const resp = await getJSON<BarsResponse>(`/api/bars?${params.toString()}`);
-          if (resp.replayDaysList.length > 0 && replayDaysList.length === 0) {
-            replayDaysList = resp.replayDaysList;
-          }
-          if (resp.preBars && resp.preBars.t.length > 0) {
-            const { t, o, h, l, c, v } = resp.preBars;
-            preBarsByTf.set(
-              tf,
-              t.map((time, i) => ({ t: time, o: o[i], h: h[i], l: l[i], c: c[i], v: v[i] })),
-            );
-          }
-        } catch {
-          // No prehistory for this timeframe — the session still works.
-        }
-      }),
-    );
+    try {
+      const barsResp = await getJSON<{
+        bars: Record<
+          string,
+          { t: number[]; o: number[]; h: number[]; l: number[]; c: number[]; v: number[] }
+        >;
+        replayDaysList: string[];
+      }>(`/api/bars?${barsParams.toString()}`);
+      replayDaysList = barsResp.replayDaysList;
+      for (const [tf, arr] of Object.entries(barsResp.bars)) {
+        if (!(tf in TF_MS) || arr.t.length === 0) continue;
+        preBarsByTf.set(
+          tf as TF,
+          arr.t.map((time, i) => ({
+            t: time,
+            o: arr.o[i],
+            h: arr.h[i],
+            l: arr.l[i],
+            c: arr.c[i],
+            v: arr.v[i],
+          })),
+        );
+      }
+    } catch {
+      // No prehistory — the session still works (replay days build live).
+    }
 
     // Hide landing, show main app
     this.landingPage.hide();
@@ -419,15 +419,26 @@ class App implements ChartHost {
 
     ++this.sessionToken;
 
-    // Configure panes for the session
-    const finest = panes.length ? Math.min(...panes.map((p) => TF_MS[p.tf])) : 60_000;
+    // Configure panes for the session. All panes share one time window
+    // (same rightTime + pxPerMs) so timestamps map to the same x in every
+    // pane and bars align across timeframes. The window is sized to the
+    // COARSEST pane timeframe so a 1d pane isn't zoomed into a 2-hour void,
+    // and capped at the loaded data span so sparse prehistory still fills
+    // the chart.
     const cols = panes.length <= 1 ? 1 : 2;
     const paneWidth = Math.max(240, (window.innerWidth - 24) / cols);
-    const initialPxPerMs = clamp(paneWidth / (finest * 150), 1e-8, 0.2);
-    const margin = 0.02 * (paneWidth / initialPxPerMs);
+    const coarsestTf = panes.length ? Math.max(...panes.map((p) => TF_MS[p.tf])) : 300_000;
+    let windowMs = coarsestTf * 150;
+    const seedBars = preBarsByTf.get('1m') ?? preBarsByTf.get('5m') ?? [];
+    if (seedBars.length > 0) {
+      const preSpan = info.start - seedBars[0].t;
+      windowMs = Math.min(windowMs, Math.max(preSpan + 86_400_000, coarsestTf * 12));
+    }
+    const pxPerMs = clamp(paneWidth / windowMs, 1e-8, 0.2);
+    const margin = 0.02 * (paneWidth / pxPerMs);
 
     for (const pane of panes) {
-      pane.pxPerMs = initialPxPerMs;
+      pane.pxPerMs = pxPerMs;
       pane.plotWidth = paneWidth;
       pane.rightTime = info.start + margin;
       pane.follow = true;
@@ -548,7 +559,7 @@ class App implements ChartHost {
 
   private nextTf(): TF {
     const used = new Set(this.store.state.panes.map((p) => p.tf));
-    for (const tf of ['1m', '5m', '15m', '1h', '4h', '1d', '30m', '1s'] as TF[]) {
+    for (const tf of ['1m', '5m', '15m', '30m', '1h', '4h', '1d'] as TF[]) {
       if (!used.has(tf)) return tf;
     }
     return '5m';
@@ -560,7 +571,8 @@ class App implements ChartHost {
     pane.rightTime = seed?.rightTime ?? this.store.state.replay.time;
     pane.priceMin = 0;
     pane.priceMax = 1;
-    pane.viewReady = !!seed?.viewReady;
+    // New panes inherit the seed pane's view so panes stay aligned (same
+    // shared time window when Sync is on); the user can zoom out freely.
     this.store.state.panes.push(pane);
 
     const chart = new ChartPane(this, pane.id);

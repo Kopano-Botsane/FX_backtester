@@ -48,10 +48,9 @@ INSTRUMENTS: dict[str, Instrument] = {
 SPEEDS: tuple[float, ...] = (0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000)
 
 # Client-supported timeframes. The server only needs them to validate requests.
+# Sub-minute timeframes are not supported (the pre-aggregated bar store starts
+# at 1 minute).
 TIMEFRAMES_MS: dict[str, int] = {
-    "1s": 1_000,
-    "5s": 5_000,
-    "15s": 15_000,
     "1m": 60_000,
     "5m": 300_000,
     "15m": 900_000,

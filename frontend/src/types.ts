@@ -1,9 +1,6 @@
-export type TF = '1s' | '5s' | '15s' | '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d';
+export type TF = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d';
 
 export const TF_MS: Record<TF, number> = {
-  '1s': 1_000,
-  '5s': 5_000,
-  '15s': 15_000,
   '1m': 60_000,
   '5m': 300_000,
   '15m': 900_000,
@@ -13,7 +10,7 @@ export const TF_MS: Record<TF, number> = {
   '1d': 86_400_000,
 };
 
-export const TF_LIST: TF[] = ['1s', '5s', '15s', '1m', '5m', '15m', '30m', '1h', '4h', '1d'];
+export const TF_LIST: TF[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
 export interface Bar {
   t: number;

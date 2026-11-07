@@ -147,24 +147,29 @@ def days(symbol: str) -> dict[str, object]:
 @app.get("/api/bars")
 def bars(
     symbol: str,
-    tf: str,
     start: str,
     end: str | None = None,
     historyDays: int = 5,
+    tfs: str = ",".join(BAR_TIMEFRAMES),
 ) -> dict[str, object]:
     """Return pre-aggregated OHLCV bars for fast prehistory rendering.
 
-    Uses the same day-range logic as /api/session but returns bars instead of
-    resolving to a tick tape. The client uses this for prehistory (days before
-    the replay start) and switches to WS ticks for the replay period.
+    One batch request returns every requested timeframe so the client can
+    seed all panes — and any timeframe the user switches to later — without
+    a tick-level history load. The client uses this for prehistory (days
+    before the replay start) and switches to WS ticks for the replay period.
     """
-    if tf not in TF_TO_MS:
-        raise HTTPException(status_code=400, detail=f"unsupported timeframe: {tf}")
     symbol = parse_symbol(symbol)
     start_day = parse_day(start)
     end_day = parse_day(end) if end else None
     if historyDays < 0 or historyDays > 60:
         raise HTTPException(status_code=400, detail="historyDays must be 0-60")
+    tf_list = [s.strip() for s in tfs.split(",") if s.strip()]
+    bad = [tf for tf in tf_list if tf not in TF_TO_MS]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"unsupported timeframe(s): {','.join(bad)}")
+    if not tf_list:
+        raise HTTPException(status_code=400, detail="tfs must not be empty")
     try:
         days = store.days_for_range(symbol, start_day, end_day, historyDays)
     except KeyError as exc:
@@ -176,22 +181,26 @@ def bars(
     pre_days = [d for d in days if d < start_day]
     replay_days = [d for d in days if d >= start_day]
 
-    pre_bars = store.load_bars(symbol, tf, pre_days) if pre_days else None
+    pre_bars = store.load_bars_multi(symbol, tf_list, pre_days) if pre_days else {}
 
     return {
         "symbol": symbol,
-        "tf": tf,
+        "tfs": tf_list,
         "digits": INSTRUMENTS[symbol].digits,
         "prehistoryDays": len(pre_days),
         "replayDays": len(replay_days),
-        "preBars": {
-            "t": pre_bars.t.tolist(),
-            "o": pre_bars.o.tolist(),
-            "h": pre_bars.h.tolist(),
-            "l": pre_bars.l.tolist(),
-            "c": pre_bars.c.tolist(),
-            "v": pre_bars.v.tolist(),
-        } if pre_bars is not None and len(pre_bars) > 0 else None,
+        "bars": {
+            tf: {
+                "t": b.t.tolist(),
+                "o": b.o.tolist(),
+                "h": b.h.tolist(),
+                "l": b.l.tolist(),
+                "c": b.c.tolist(),
+                "v": b.v.tolist(),
+            }
+            for tf, b in pre_bars.items()
+            if len(b) > 0
+        },
         "replayDaysList": [d.isoformat() for d in replay_days],
     }
 
