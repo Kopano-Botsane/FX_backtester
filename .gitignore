@@ -25,3 +25,6 @@ backend/data/bars/
 .vscode/
 *.log
 /MT5_CSV/
+
+# AppImage extraction artifacts
+squashfs-root/
