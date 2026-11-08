@@ -137,6 +137,10 @@ async function createWindow() {
   });
 
   const devUrl = process.env.BT_DEV_URL;
+  // Belt and braces: a user-data HTTP cache can serve a stale demo bundle
+  // when the packaged frontend was rebuilt. The backend also sends
+  // Cache-Control: no-cache for HTML, but clear once on boot anyway.
+  await win.webContents.session.clearCache();
   if (devUrl) {
     await win.loadURL(devUrl);
     win.webContents.openDevTools({ mode: 'detach' });

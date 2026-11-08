@@ -12,10 +12,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from typing import Callable
 
 from . import __version__
 from .config import (
@@ -515,6 +516,17 @@ _dist_env = os.environ.get("BT_FRONTEND_DIST")
 _dist = Path(_dist_env) if _dist_env else ROOT / "frontend" / "dist"
 if _dist.exists():
     app.mount("/", StaticFiles(directory=str(_dist), html=True), name="app")
+
+    # Chromium caches unpaved HTML files heuristically for up to days once
+    # they are old (freshness = 10% of age). A rebuilt dist then never
+    # reaches the Electron window: it keeps serving the previous session's
+    # bundle from its userData cache. index.html must always revalidate.
+    @app.middleware("http")
+    async def _no_cache_html(request: Request, call_next: Callable) -> Response:
+        response = await call_next(request)
+        if response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 @app.exception_handler(HTTPException)
