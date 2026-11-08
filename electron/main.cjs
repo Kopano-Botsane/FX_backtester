@@ -59,8 +59,11 @@ function backendEnv() {
   if (app.isPackaged) {
     // A one-file bundle unpacks to a temp dir, so keep writable state in userData.
     const userData = app.getPath('userData');
-    env.BT_DATA_DIR = path.join(userData, 'data');
-    env.BT_CACHE_DIR = path.join(userData, 'cache');
+    // An externally supplied BT_DATA_DIR wins, e.g. launching with
+    //   BT_DATA_DIR=.../backend/data ./Backtester.AppImage
+    // to reuse the dev working copy's imported MT5 exports.
+    env.BT_DATA_DIR ||= path.join(userData, 'data');
+    env.BT_CACHE_DIR ||= path.join(userData, 'cache');
   }
   env.BT_WATCH_STDIN = '1';
   return env;
