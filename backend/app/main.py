@@ -8,7 +8,7 @@ import struct
 import sys
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +20,7 @@ from typing import Callable
 
 from . import __version__
 from .config import (
+    DATA_DIR,
     FRAME_MS,
     HISTORY_CHUNK,
     INSTRUMENTS,
@@ -133,6 +134,145 @@ def instruments() -> dict[str, object]:
         ],
         "speeds": list(SPEEDS),
         "timeframes": list(TIMEFRAMES_MS),
+        # Setup screen: default tick-path root the engine actually reads.
+        "dataDir": str(DATA_DIR),
+    }
+
+
+@app.get("/api/scan")
+def scan(
+    symbol: str,
+    start: str,
+    end: str,
+    historyDays: int = 0,
+    path: str | None = None,
+) -> dict[str, object]:
+    """Verify a setup-screen configuration against the tick store.
+
+    Real checks, no simulation: the tick path is readable, ticks exist for the
+    symbol, the tape covers start→end, and the preload window before the start
+    has data. Unknown symbols and missing data are reported as failed checks,
+    not HTTP errors, so the setup screen can render them inline.
+    """
+    checks: list[dict[str, object]] = []
+
+    # 1. Tick path readability.
+    if not (path or "").strip():
+        checks.append({
+            "id": "path",
+            "ok": False,
+            "label": "Tick data path is readable",
+            "detail": "No tick data path set.",
+        })
+    else:
+        p = Path(path)
+        if p.exists():
+            kind = "folder" if p.is_dir() else "file"
+            checks.append({
+                "id": "path",
+                "ok": True,
+                "label": "Tick data path is readable",
+                "detail": f"{p} ({kind})",
+            })
+        else:
+            checks.append({
+                "id": "path",
+                "ok": False,
+                "label": "Tick data path is readable",
+                "detail": f"{path} does not exist on this machine.",
+            })
+
+    # 2–4. Tape checks against the engine's own store.
+    sym = (symbol or "").upper()
+    first = last = None
+    count = 0
+    if sym not in INSTRUMENTS:
+        checks.append({
+            "id": "symbol",
+            "ok": False,
+            "label": f"Ticks found for {sym or 'the symbol'}",
+            "detail": f"{sym!r} is not a known symbol in the tick store.",
+        })
+    else:
+        days = store.session_days(sym)
+        count = len(days)
+        if days:
+            first, last = days[-1], days[0]
+        if not days:
+            checks.append({
+                "id": "symbol",
+                "ok": False,
+                "label": f"Ticks found for {sym}",
+                "detail": "The tick store has no sessions for this symbol.",
+            })
+        else:
+            checks.append({
+                "id": "symbol",
+                "ok": True,
+                "label": f"Ticks found for {sym}",
+                "detail": f"{count} sessions, {first.isoformat()} → {last.isoformat()}.",
+            })
+            start_day = parse_day(start)
+            end_day = parse_day(end)
+            if start_day >= end_day:
+                checks.append({
+                    "id": "coverage",
+                    "ok": False,
+                    "label": "Data covers the replay period",
+                    "detail": "The end date must be after the start date.",
+                })
+            elif first > start_day or last < end_day:
+                checks.append({
+                    "id": "coverage",
+                    "ok": False,
+                    "label": "Data covers the replay period",
+                    "detail": (
+                        f"Data runs {first.isoformat()} → {last.isoformat()}; "
+                        f"the period needs {start_day.isoformat()} → {end_day.isoformat()}."
+                    ),
+                })
+            else:
+                checks.append({
+                    "id": "coverage",
+                    "ok": True,
+                    "label": "Data covers the replay period",
+                    "detail": f"{start_day.isoformat()} → {end_day.isoformat()} is available.",
+                })
+            if historyDays > 0:
+                preload_start = start_day - timedelta(days=historyDays)
+                if first <= preload_start:
+                    checks.append({
+                        "id": "preload",
+                        "ok": True,
+                        "label": f"{historyDays} preload days available before {start_day.isoformat()}",
+                        "detail": f"Earliest data {first.isoformat()} reaches back past {preload_start.isoformat()}.",
+                    })
+                else:
+                    checks.append({
+                        "id": "preload",
+                        "ok": False,
+                        "label": f"{historyDays} preload days available before {start_day.isoformat()}",
+                        "detail": (
+                            f"Preload needs data from {preload_start.isoformat()}; "
+                            f"earliest is {first.isoformat()}."
+                        ),
+                    })
+            else:
+                checks.append({
+                    "id": "preload",
+                    "ok": True,
+                    "label": "No preload requested",
+                    "detail": "History preload is set to 0 days.",
+                })
+
+    ok = all(c["ok"] for c in checks) and len(checks) >= 4
+    return {
+        "ok": ok,
+        "checks": checks,
+        "symbol": sym,
+        "available": {"first": first.isoformat() if first else None,
+                      "last": last.isoformat() if last else None,
+                      "count": count},
     }
 
 
@@ -164,7 +304,7 @@ def bars(
     start_day = parse_day(start)
     end_day = parse_day(end) if end else None
     if historyDays < 0 or historyDays > 60:
-        raise HTTPException(status_code=400, detail="historyDays must be 0-60")
+        raise HTTPException(status_code=400, detail="historyDays must be 0-365")
     tf_list = [s.strip() for s in tfs.split(",") if s.strip()]
     bad = [tf for tf in tf_list if tf not in TF_TO_MS]
     if bad:
@@ -220,7 +360,7 @@ def session(
     start_day = parse_day(start)
     end_day = parse_day(end) if end else None
     if historyDays < 0 or historyDays > 60:
-        raise HTTPException(status_code=400, detail="historyDays must be 0-60")
+        raise HTTPException(status_code=400, detail="historyDays must be 0-365")
     try:
         days = store.days_for_range(symbol, start_day, end_day, historyDays)
     except KeyError as exc:

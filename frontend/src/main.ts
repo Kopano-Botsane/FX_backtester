@@ -29,6 +29,7 @@ interface InstrumentMeta {
   instruments: InstrumentInfo[];
   speeds: number[];
   timeframes: string[];
+  dataDir?: string;
 }
 
 async function getJSON<T>(url: string): Promise<T> {
@@ -141,6 +142,7 @@ class App implements ChartHost {
       start: (cfg) => this.startSession(cfg),
     });
     this.landingPage.setSymbols(meta.instruments);
+    if (meta.dataDir) this.landingPage.setDataDir(meta.dataDir);
     this.landingPage.show();
   }
 

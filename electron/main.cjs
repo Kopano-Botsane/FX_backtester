@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const http = require('node:http');
@@ -119,6 +119,19 @@ async function createWindow() {
     app.quit();
     return;
   }
+
+  // Setup screen: native folder/file picker for the tick data path.
+  ipcMain.handle('bt:pick-tick-data', async (_event, currentPath) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    const opts = {
+      title: 'Choose tick data folder or file',
+      defaultPath: currentPath || undefined,
+      properties: ['openFile', 'openDirectory', 'dontAddToRecent'],
+    };
+    const res = await dialog.showOpenDialog(win, opts);
+    if (res.canceled || res.filePaths.length === 0) return null;
+    return res.filePaths[0];
+  });
 
   const win = new BrowserWindow({
     width: 1600,

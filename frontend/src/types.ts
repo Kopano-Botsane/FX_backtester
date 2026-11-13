@@ -186,12 +186,22 @@ export interface EquityPoint {
   e: number;
 }
 
+export type TickFormat = 'csv' | 'parquet' | 'bi5' | 'mt5';
+export type TickTimezone = 'utc' | 'eet' | 'ny17';
+
 export interface SessionConfig {
   symbol: string;
   balance: number;
   start: string;
   end: string | null;
   historyDays: number;
+  /** Optional setup-screen extras (informational until the engine consumes them). */
+  name?: string;
+  currency?: string;
+  leverage?: string;
+  tickPath?: string;
+  tickFormat?: TickFormat;
+  tickTz?: TickTimezone;
 }
 
 export interface InstrumentInfo {
