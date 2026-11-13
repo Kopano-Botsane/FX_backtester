@@ -68,8 +68,8 @@ const TIMEZONES: { id: TickTimezone; label: string }[] = [
   { id: 'ny17', label: 'New York 17:00' },
 ];
 
-const CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY'] as const;
-const LEVERAGES = ['1:30', '1:50', '1:100', '1:200', '1:500'] as const;
+const CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'ZAR'] as const;
+const LEVERAGES = ['1:30', '1:50', '1:100', '1:200', '1:500', '1:1000', '1:2000'] as const;
 
 const DEFAULT_START = '2026-09-01';
 const DEFAULT_END = '2026-10-31';
